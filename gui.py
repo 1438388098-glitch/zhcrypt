@@ -1041,49 +1041,57 @@ class ZhCryptGUI:
     def _build_chat_tab(self):
         main = ttk.Frame(self.tab_chat, padding=8)
         main.pack(fill=tk.BOTH, expand=True)
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(1, weight=1)
 
-        # ---- Header ----
+        # ---- Header (grid) ----
         header = ttk.Frame(main)
-        header.pack(fill=tk.X, pady=(0, 8))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        for i in range(7):
+            if i in (1, 3):
+                header.columnconfigure(i, weight=1)
+            else:
+                header.columnconfigure(i, weight=0)
 
-        sel_row = ttk.Frame(header)
-        sel_row.pack(fill=tk.X)
-        ttk.Label(sel_row, text="身份:").pack(side=tk.LEFT, padx=(0, 4))
+        c = 0
+        ttk.Label(header, text="身份:").grid(row=0, column=c, sticky="w", padx=(0, 2)); c += 1
         self.chat_identity_var = tk.StringVar()
-        self.chat_identity_combo = ttk.Combobox(sel_row, textvariable=self.chat_identity_var,
-                                                 state="readonly", width=12)
-        self.chat_identity_combo.pack(side=tk.LEFT, padx=(0, 8))
+        self.chat_identity_combo = ttk.Combobox(header, textvariable=self.chat_identity_var,
+                                                 state="readonly")
+        self.chat_identity_combo.grid(row=0, column=c, sticky="ew", padx=(0, 6)); c += 1
         self.chat_identity_combo.bind("<<ComboboxSelected>>", self._on_chat_identity_change)
 
-        ttk.Label(sel_row, text="对方:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(header, text="对方:").grid(row=0, column=c, sticky="w", padx=(0, 2)); c += 1
         self.chat_peer_var = tk.StringVar()
-        self.chat_peer_combo = ttk.Combobox(sel_row, textvariable=self.chat_peer_var,
-                                             state="readonly", width=12)
-        self.chat_peer_combo.pack(side=tk.LEFT, padx=(0, 8))
+        self.chat_peer_combo = ttk.Combobox(header, textvariable=self.chat_peer_var,
+                                             state="readonly")
+        self.chat_peer_combo.grid(row=0, column=c, sticky="ew", padx=(0, 6)); c += 1
         self.chat_peer_combo.bind("<<ComboboxSelected>>", self._on_chat_select_peer)
 
-        self.chat_connect_btn = ttk.Button(sel_row, text="连接", command=self._on_chat_connect)
-        self.chat_connect_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self.chat_connect_btn = ttk.Button(header, text="连接", command=self._on_chat_connect)
+        self.chat_connect_btn.grid(row=0, column=c, sticky="w", padx=(0, 4)); c += 1
 
-        self.chat_status_label = ttk.Label(sel_row, text="● 未连接", foreground="#999")
-        self.chat_status_label.pack(side=tk.LEFT, padx=(0, 4))
+        self.chat_status_label = ttk.Label(header, text="● 未连接", foreground="#999")
+        self.chat_status_label.grid(row=0, column=c, sticky="w", padx=(0, 4)); c += 1
 
-        self.chat_setup_btn = ttk.Button(sel_row, text="?", command=self._on_chat_setup_guide, width=2)
-        self.chat_setup_btn.pack(side=tk.LEFT)
+        self.chat_setup_btn = ttk.Button(header, text="?", command=self._on_chat_setup_guide, width=2)
+        self.chat_setup_btn.grid(row=0, column=c, sticky="w"); c += 1
 
         # ---- Message Display ----
         msg_frame = ttk.Frame(main)
-        msg_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        msg_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+        msg_frame.columnconfigure(0, weight=1)
+        msg_frame.rowconfigure(0, weight=1)
 
         self.chat_msg_display = tk.Text(msg_frame, wrap=tk.WORD,
                                          font=("Microsoft YaHei", 10),
                                          state=tk.DISABLED, bg="#f5f6f8",
                                          relief=tk.FLAT, bd=0,
                                          padx=12, pady=8)
-        chat_scroll = ttk.Scrollbar(msg_frame, command=self.chat_msg_display.yview)
+        chat_scroll = ttk.Scrollbar(msg_frame, orient=tk.VERTICAL, command=self.chat_msg_display.yview)
         self.chat_msg_display.config(yscrollcommand=chat_scroll.set)
-        chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.chat_msg_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        chat_scroll.grid(row=0, column=1, sticky="ns")
+        self.chat_msg_display.grid(row=0, column=0, sticky="nsew")
 
         # Tags
         self.chat_msg_display.tag_configure("ts", foreground="#8e8e93", font=("Microsoft YaHei", 7))
@@ -1108,9 +1116,10 @@ class ZhCryptGUI:
         self.chat_msg_display.tag_configure("m_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
                                              lmargin1=80)
 
-        # ---- Input Area ----
+        # ---- Input Area (grid) ----
         input_frame = ttk.Frame(main)
-        input_frame.pack(fill=tk.X)
+        input_frame.grid(row=2, column=0, sticky="ew")
+        input_frame.columnconfigure(0, weight=1)
 
         self.chat_input = tk.Text(input_frame, height=2, wrap=tk.WORD,
                                    font=("Microsoft YaHei", 10),
@@ -1118,21 +1127,21 @@ class ZhCryptGUI:
                                    highlightthickness=1,
                                    highlightbackground="#d1d1d6",
                                    padx=8, pady=6)
-        self.chat_input.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.chat_input.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         self.chat_input.bind("<Return>", self._on_chat_input_enter)
         self.chat_input.bind("<Shift-Return>", lambda e: None)
 
         btn_col = ttk.Frame(input_frame)
-        btn_col.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
+        btn_col.grid(row=0, column=1, sticky="ns")
         self.chat_send_btn = ttk.Button(btn_col, text="发送", command=self._on_chat_send)
         self.chat_send_btn.pack(fill=tk.X, pady=(0, 2))
         self.chat_emoji_btn = ttk.Button(btn_col, text="Emoji", command=self._on_emoji_picker)
         self.chat_emoji_btn.pack(fill=tk.X, pady=(0, 2))
         self.chat_file_btn = ttk.Button(btn_col, text="File", command=self._on_chat_send_file)
-        self.chat_file_btn.pack(fill=tk.X, pady=(0, 2))
+        self.chat_file_btn.pack(fill=tk.X)
 
         bottom_row = ttk.Frame(main)
-        bottom_row.pack(fill=tk.X, pady=(4, 0))
+        bottom_row.grid(row=3, column=0, sticky="ew", pady=(4, 0))
         self.chat_enc_status = ttk.Label(bottom_row, text="E2E 加密中",
                                           font=("Microsoft YaHei", 7), foreground="#8e8e93")
         self.chat_enc_status.pack(side=tk.LEFT)
