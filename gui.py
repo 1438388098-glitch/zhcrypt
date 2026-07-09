@@ -1115,19 +1115,15 @@ class ZhCryptGUI:
             d = _os.path.join(_os.path.expanduser("~"), ".zhcrypt", "keys")
             if _os.path.exists(d):
                 for fn in _os.listdir(d):
-                    if fn.endswith(".meta"):
-                        ident = fn[:-5]
-                        meta_path = _os.path.join(d, fn)
-                        try:
-                            with open(meta_path, "r", encoding="utf-8") as f:
-                                import json as _json
-                                meta = _json.load(f)
-                            if meta.get("type") in ("imported_public_key_bundle", "imported_public_key"):
-                                peers.append(ident)
-                        except Exception:
-                            pass
+                    if fn.endswith(".pub") and not fn.endswith(".ed25519.pub") \
+                            and not fn.endswith(".x25519.pub"):
+                        ident = fn[:-4]
+                        ident_self = self.chat_identity_var.get()
+                        if ident and ident != ident_self:
+                            peers.append(ident)
         except Exception:
             pass
+        peers = sorted(set(peers))
         try:
             self.chat_peer_combo["values"] = peers
         except Exception:
@@ -1164,6 +1160,7 @@ class ZhCryptGUI:
             self._chat_client = None
         self._chat_peer = None
         self.chat_status_label.config(text="● 未连接", foreground="#999")
+        self._refresh_chat_contacts()
 
     def _on_chat_setup_guide(self):
         messagebox.showinfo("聊天准备步骤",
@@ -1226,8 +1223,7 @@ class ZhCryptGUI:
                 self.notebook.select(self.tab_keys)
             return
 
-        import simpledialog as _sd
-        passphrase = _sd.askstring("私钥密码", f"[{identity}] 请输入私钥密码:",
+        passphrase = simpledialog.askstring("私钥密码", f"[{identity}] 请输入私钥密码:",
                                      show="*", parent=self.root)
         if not passphrase:
             return
@@ -1250,7 +1246,7 @@ class ZhCryptGUI:
         self._append_chat_msg("system", f"正在连接到 {server_url} ...")
         self.root.after(2000, self._check_chat_connected)
 
-    def _check_chat_connected(self):
+    def _check_chat_connected(self, attempt=0):
         if not self._chat_client:
             return
         if self._chat_client.connected:
@@ -1258,8 +1254,17 @@ class ZhCryptGUI:
             self._append_chat_msg("system", "已连接到服务器")
             self._chat_poll_id = self.root.after(2000, self._poll_chat)
         else:
-            self._append_chat_msg("system", "连接中...")
-            self.root.after(2000, self._check_chat_connected)
+            attempt += 1
+            if attempt > 5:
+                self.chat_status_label.config(text="● 连接失败", foreground="#e74c3c")
+                self._append_chat_msg("error",
+                    "连接服务器失败，请检查：\n"
+                    "1. 系统配置标签中的服务器地址是否正确\n"
+                    "2. 网络是否正常\n"
+                    "3. 重新点击「连接」重试")
+                return
+            self._append_chat_msg("system", "连接中... (%d/5)" % attempt)
+            self.root.after(2000, lambda: self._check_chat_connected(attempt))
 
         items = self._chat_client.process_inbound()
         for item in items:

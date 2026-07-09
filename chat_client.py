@@ -103,12 +103,14 @@ class ChatClient:
 
     def _ws_loop(self):
         backoff = self._reconnect_delay
+        reported_error = False
         while self._running:
             try:
                 self._connect_ws()
                 backoff = self._reconnect_delay
                 self._ws_ready = True
                 self._connected = True
+                reported_error = False
                 INBOUND.put({"action": "status", "connected": True})
 
                 while self._running:
@@ -122,7 +124,9 @@ class ChatClient:
                         break
 
             except Exception as e:
-                pass
+                if not reported_error:
+                    INBOUND.put({"action": "error", "message": f"连接失败: {e}"})
+                    reported_error = True
 
             self._connected = False
             self._ws_ready = False
