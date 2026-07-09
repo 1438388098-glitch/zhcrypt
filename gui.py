@@ -115,6 +115,7 @@ class ZhCryptGUI:
         self._build_notebook()
         self._build_status_bar()
         self._refresh_identity_list()
+        self._refresh_cfg_identities()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -573,6 +574,20 @@ class ZhCryptGUI:
         except Exception:
             pass
 
+    def _refresh_cfg_identities(self):
+        try:
+            ids = [id_["identity"] for id_ in self.store.list_identities()]
+            self.cfg_pk_identity_combo["values"] = ids
+            if ids and not self.cfg_pk_identity_var.get():
+                self.cfg_pk_identity_var.set(ids[0])
+        except Exception:
+            pass
+        try:
+            ids = [id_["identity"] for id_ in self.store.list_identities()]
+            self.chat_identity_combo["values"] = ids
+        except Exception:
+            pass
+
     def _get_selected_identity(self):
         sel = self.tree.selection()
         if not sel:
@@ -794,6 +809,15 @@ class ZhCryptGUI:
         entry_url.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
         ToolTip(entry_url, "Prekey 服务器 URL。用于前向安全(PFS)通信\n的临时公钥存储与分发。部署在阿里云 ECS。")
 
+        row_ident = ttk.Frame(frame_prekey)
+        row_ident.pack(fill=tk.X, pady=4)
+        ttk.Label(row_ident, text="身份:").pack(side=tk.LEFT, padx=(0, 4))
+        self.cfg_pk_identity_var = tk.StringVar()
+        self.cfg_pk_identity_combo = ttk.Combobox(row_ident, textvariable=self.cfg_pk_identity_var,
+                                                    state="readonly", width=20)
+        self.cfg_pk_identity_combo.pack(side=tk.LEFT, padx=(0, 12))
+        ToolTip(self.cfg_pk_identity_combo, "选择要上传 Prekey 的身份。\n每个身份只需上传一次，双方都要上传。")
+
         row_pk_btn = ttk.Frame(frame_prekey)
         row_pk_btn.pack(fill=tk.X, pady=4)
         ttk.Button(row_pk_btn, text="测试连接", command=self._on_test_prekey).pack(side=tk.LEFT, padx=(0, 6))
@@ -860,6 +884,7 @@ class ZhCryptGUI:
         if identities:
             if not self.hybrid_sender_var.get():
                 self.hybrid_sender_var.set(identities[0])
+        self._refresh_cfg_identities()
 
     def _on_hybrid_encrypt(self):
         sender = self.hybrid_sender_var.get()
@@ -954,15 +979,16 @@ class ZhCryptGUI:
             self.store.import_public_key_bundle(bundle, name)
             self._refresh_identity_list()
             self._refresh_hybrid_identities()
+            self._refresh_cfg_identities()
             self._refresh_chat_contacts()
             self._set_status(f"已导入 {name} 的完整公钥束", 4000)
         except Exception as e:
             messagebox.showerror("错误", str(e))
 
     def _on_upload_prekey(self):
-        identity = self.chat_identity_var.get()
+        identity = self.cfg_pk_identity_var.get()
         if not identity:
-            messagebox.showwarning("警告", "请在聊天标签选择你的身份")
+            messagebox.showwarning("警告", "请先在上方选择要上传的身份")
             return
         passphrase = simpledialog.askstring(
             "私钥密码", f"上传 {identity} 的 Prekey\n请输入私钥密码:", show="*", parent=self.root)
