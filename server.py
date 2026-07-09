@@ -94,6 +94,31 @@ def init_db():
             last_seen REAL NOT NULL
         )
     """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'message',
+            payload_json TEXT NOT NULL,
+            server_ts REAL NOT NULL,
+            delivered_at REAL,
+            delivery_ack_at REAL
+        )
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_recipient
+        ON messages(recipient, delivered_at, server_ts)
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_session
+        ON messages(session_id, server_ts)
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_server_ts
+        ON messages(server_ts)
+    """)
     db.commit()
     db.close()
 
@@ -321,6 +346,176 @@ def remaining_prekeys(identity):
         "remaining": count,
         "recommended_upload": count < 10,
     })
+
+
+MESSAGE_RATE_LIMIT = 30
+MESSAGE_RETENTION_DAYS = 30
+
+_message_rate_buckets = {}
+
+
+def _check_message_rate(identity):
+    now = _now()
+    bucket = _message_rate_buckets.get(identity, [])
+    bucket = [t for t in bucket if now - t < 60]
+    _message_rate_buckets[identity] = bucket
+    if len(bucket) >= MESSAGE_RATE_LIMIT:
+        return False
+    bucket.append(now)
+    return True
+
+
+@app.route("/v1/messages/send", methods=["POST"])
+@require_auth
+def message_send():
+    data = request.get_json(force=True)
+    if not data or not data.get("id") or not data.get("to"):
+        return jsonify({"error": "missing id or recipient"}), 400
+
+    sender = data.get("from", "unknown")
+    if not _check_message_rate(sender):
+        return jsonify({"error": "rate limited"}), 429
+
+    db = get_db()
+    db.execute("""
+        INSERT OR IGNORE INTO messages
+        (id, session_id, sender, recipient, type, payload_json, server_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data["id"],
+        data.get("session_id", ""),
+        sender,
+        data["to"],
+        data.get("type", "message"),
+        json.dumps(data.get("payload", {}), ensure_ascii=False),
+        _now(),
+    ))
+    db.commit()
+    return jsonify({"status": "stored", "msg_id": data["id"]})
+
+
+@app.route("/v1/messages/pending", methods=["GET"])
+@require_auth
+def message_pending():
+    identity = request.args.get("identity", "")
+    limit = min(int(request.args.get("limit", "50")), 100)
+    if not identity:
+        return jsonify({"error": "identity required"}), 400
+
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    rows = db.execute("""
+        SELECT * FROM messages
+        WHERE recipient = ? AND delivered_at IS NULL
+        ORDER BY server_ts ASC LIMIT ?
+    """, (identity, limit)).fetchall()
+
+    msgs = []
+    msg_ids = []
+    for row in rows:
+        msgs.append({
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "from": row["sender"],
+            "to": row["recipient"],
+            "type": row["type"],
+            "timestamp": row["server_ts"],
+            "payload": json.loads(row["payload_json"]),
+        })
+        msg_ids.append(row["id"])
+
+    if msg_ids:
+        db.executemany(
+            "UPDATE messages SET delivered_at = ? WHERE id = ?",
+            [(_now(), mid) for mid in msg_ids],
+        )
+    db.commit()
+    return jsonify({"messages": msgs, "count": len(msgs)})
+
+
+@app.route("/v1/messages/ack", methods=["POST"])
+@require_auth
+def message_ack():
+    data = request.get_json(force=True)
+    msg_ids = data.get("msg_ids", [])
+    if not msg_ids:
+        return jsonify({"error": "msg_ids required"}), 400
+
+    db = get_db()
+    db.executemany(
+        "UPDATE messages SET delivery_ack_at = ? WHERE id = ?",
+        [(_now(), mid) for mid in msg_ids],
+    )
+    db.commit()
+    return jsonify({"acked": len(msg_ids)})
+
+
+@app.route("/v1/messages/history", methods=["GET"])
+@require_auth
+def message_history():
+    identity = request.args.get("identity", "")
+    peer = request.args.get("with", "")
+    before_id = request.args.get("before", None)
+    limit = min(int(request.args.get("limit", "50")), 200)
+
+    if not identity or not peer:
+        return jsonify({"error": "identity and with required"}), 400
+
+    db = get_db()
+    if before_id:
+        rows = db.execute("""
+            SELECT * FROM messages
+            WHERE ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))
+              AND server_ts < (SELECT server_ts FROM messages WHERE id = ?)
+            ORDER BY server_ts DESC LIMIT ?
+        """, (identity, peer, peer, identity, before_id, limit)).fetchall()
+    else:
+        rows = db.execute("""
+            SELECT * FROM messages
+            WHERE (sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)
+            ORDER BY server_ts DESC LIMIT ?
+        """, (identity, peer, peer, identity, limit)).fetchall()
+
+    msgs = []
+    for row in reversed(rows):
+        msgs.append({
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "from": row["sender"],
+            "to": row["recipient"],
+            "type": row["type"],
+            "timestamp": row["server_ts"],
+            "payload": json.loads(row["payload_json"]),
+        })
+    return jsonify({"messages": msgs, "count": len(msgs)})
+
+
+@app.route("/v1/messages/prune", methods=["DELETE"])
+@require_auth
+def message_prune():
+    days = int(request.args.get("older_than_days", str(MESSAGE_RETENTION_DAYS)))
+    cutoff = _now() - days * 86400
+    db = get_db()
+    deleted = db.execute(
+        "DELETE FROM messages WHERE server_ts < ?", (cutoff,)
+    ).rowcount
+    db.commit()
+    return jsonify({"deleted": deleted, "older_than_days": days})
+
+
+@app.route("/v1/identities", methods=["GET"])
+@require_auth
+def list_identities():
+    db = get_db()
+    rows = db.execute(
+        "SELECT identity, fingerprint, last_seen FROM identities ORDER BY last_seen DESC"
+    ).fetchall()
+    idents = [{
+        "identity": r["identity"],
+        "fingerprint": r["fingerprint"],
+        "last_seen": r["last_seen"],
+    } for r in rows]
+    return jsonify({"identities": idents, "count": len(idents)})
 
 
 def cleanup_expired():

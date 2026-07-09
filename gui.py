@@ -7,6 +7,7 @@ zhcrypt GUI - 中文加密系统图形面板
 
 import os
 import sys
+import time
 import tempfile
 import threading
 
@@ -102,6 +103,9 @@ class ZhCryptGUI:
 
         self.store = KeyStore()
         self._current_password = ""
+        self._chat_client = None
+        self._chat_peer = None
+        self._chat_poll_id = None
 
         self._build_menu()
         self._build_notebook()
@@ -131,18 +135,21 @@ class ZhCryptGUI:
         self.tab_keys = ttk.Frame(self.notebook)
         self.tab_hybrid = ttk.Frame(self.notebook)
         self.tab_config = ttk.Frame(self.notebook)
+        self.tab_chat = ttk.Frame(self.notebook)
 
         self.notebook.add(self.tab_text, text=" 文本加解密 ")
         self.notebook.add(self.tab_file, text=" 文件加解密 ")
         self.notebook.add(self.tab_keys, text=" 密钥管理 ")
         self.notebook.add(self.tab_hybrid, text=" 混合模式 ")
         self.notebook.add(self.tab_config, text=" 系统配置 ")
+        self.notebook.add(self.tab_chat, text="  聊天  ")
 
         self._build_text_tab()
         self._build_file_tab()
         self._build_keys_tab()
         self._build_hybrid_tab()
         self._build_config_tab()
+        self._build_chat_tab()
 
     def _build_status_bar(self):
         self.status_var = tk.StringVar(value="就绪")
@@ -889,6 +896,288 @@ class ZhCryptGUI:
             self.root.clipboard_append(text)
             self._set_status("已复制到剪贴板", 3000)
 
+    def _build_chat_tab(self):
+        main = ttk.Frame(self.tab_chat, padding=8)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        top_row = ttk.Frame(main)
+        top_row.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(top_row, text="对方:").pack(side=tk.LEFT, padx=(0, 4))
+        self.chat_peer_var = tk.StringVar()
+        self.chat_peer_combo = ttk.Combobox(top_row, textvariable=self.chat_peer_var,
+                                             state="readonly", width=20)
+        self.chat_peer_combo.pack(side=tk.LEFT, padx=(0, 8))
+        self.chat_peer_combo.bind("<<ComboboxSelected>>", self._on_chat_select_peer)
+
+        ttk.Label(top_row, text="身份:").pack(side=tk.LEFT, padx=(0, 4))
+        self.chat_identity_var = tk.StringVar()
+        self.chat_identity_combo = ttk.Combobox(top_row, textvariable=self.chat_identity_var,
+                                                 state="readonly", width=14)
+        self.chat_identity_combo.pack(side=tk.LEFT, padx=(0, 8))
+        self.chat_identity_combo.bind("<<ComboboxSelected>>", self._on_chat_identity_change)
+
+        self.chat_connect_btn = ttk.Button(top_row, text="连接", command=self._on_chat_connect)
+        self.chat_connect_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.chat_status_label = ttk.Label(top_row, text="● 未连接", foreground="#999")
+        self.chat_status_label.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.chat_new_msg_label = ttk.Label(top_row, text="", foreground="#e74c3c", font=("", 9, "bold"))
+        self.chat_new_msg_label.pack(side=tk.LEFT)
+
+        msg_frame = ttk.Frame(main)
+        msg_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+
+        self.chat_msg_display = tk.Text(msg_frame, height=16, wrap=tk.WORD,
+                                         font=("Microsoft YaHei", 10),
+                                         state=tk.DISABLED, bg="#fafafa")
+        chat_scroll = ttk.Scrollbar(msg_frame, command=self.chat_msg_display.yview)
+        self.chat_msg_display.config(yscrollcommand=chat_scroll.set)
+        chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.chat_msg_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.chat_msg_display.tag_configure("peer", foreground="#2c3e50", font=("Microsoft YaHei", 9, "bold"))
+        self.chat_msg_display.tag_configure("peer_text", foreground="#2c3e50", lmargin1=20, lmargin2=20,
+                                             background="#e8e8e8", spacing1=4, spacing3=4)
+        self.chat_msg_display.tag_configure("me", foreground="#1a5276", font=("Microsoft YaHei", 9, "bold"))
+        self.chat_msg_display.tag_configure("me_text", foreground="#1a5276", lmargin1=20, lmargin2=20,
+                                             background="#d4e6f1", spacing1=4, spacing3=4)
+        self.chat_msg_display.tag_configure("verified", foreground="#27ae60", font=("Microsoft YaHei", 7))
+        self.chat_msg_display.tag_configure("unverified", foreground="#e67e22", font=("Microsoft YaHei", 7))
+        self.chat_msg_display.tag_configure("system", foreground="#999", font=("Microsoft YaHei", 8))
+        self.chat_msg_display.tag_configure("error", foreground="#e74c3c", font=("Microsoft YaHei", 8))
+
+        input_row = ttk.Frame(main)
+        input_row.pack(fill=tk.X)
+
+        self.chat_input = ttk.Entry(input_row, font=("Microsoft YaHei", 10))
+        self.chat_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self.chat_input.bind("<Return>", lambda e: self._on_chat_send())
+
+        self.chat_send_btn = ttk.Button(input_row, text="发送", command=self._on_chat_send)
+        self.chat_send_btn.pack(side=tk.LEFT)
+
+        bottom_row = ttk.Frame(main)
+        bottom_row.pack(fill=tk.X, pady=(4, 0))
+        self.chat_enc_status = ttk.Label(bottom_row, text="E2E 加密中 | X3DH + Double Ratchet",
+                                          font=("Microsoft YaHei", 7), foreground="#999")
+        self.chat_enc_status.pack(side=tk.LEFT)
+
+        self._refresh_chat_contacts()
+
+    def _refresh_chat_contacts(self):
+        peers = []
+        try:
+            import os as _os
+            d = _os.path.join(_os.path.expanduser("~"), ".zhcrypt", "keys")
+            if _os.path.exists(d):
+                for fn in _os.listdir(d):
+                    if fn.endswith(".meta"):
+                        ident = fn[:-5]
+                        meta_path = _os.path.join(d, fn)
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as f:
+                                import json as _json
+                                meta = _json.load(f)
+                            if meta.get("type") in ("imported_public_key_bundle", "imported_public_key"):
+                                peers.append(ident)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        try:
+            self.chat_peer_combo["values"] = peers
+        except Exception:
+            pass
+
+        identities = []
+        try:
+            identities = [id_["identity"] for id_ in self.store.list_identities()]
+        except Exception:
+            pass
+        try:
+            self.chat_identity_combo["values"] = identities
+        except Exception:
+            pass
+        if identities:
+            from config import get as _cfg_get
+            default_id = _cfg_get("default_identity", "default")
+            if default_id in identities:
+                self.chat_identity_var.set(default_id)
+            elif not self.chat_identity_var.get():
+                self.chat_identity_var.set(identities[0])
+
+    def _on_chat_select_peer(self, event=None):
+        peer = self.chat_peer_var.get()
+        if peer:
+            self._on_chat_connect()
+
+    def _on_chat_identity_change(self, event=None):
+        if self._chat_client:
+            try:
+                self._chat_client.stop()
+            except Exception:
+                pass
+            self._chat_client = None
+        self._chat_peer = None
+        self.chat_status_label.config(text="● 未连接", foreground="#999")
+
+    def _on_chat_connect(self):
+        peer = self.chat_peer_var.get()
+        identity = self.chat_identity_var.get()
+        if not peer:
+            messagebox.showwarning("警告", "请选择对方身份")
+            return
+        if not identity:
+            messagebox.showwarning("警告", "请选择你的身份")
+            return
+
+        from config import get_auth_token, get_prekey_server
+        server_url = get_prekey_server()
+        if not server_url:
+            messagebox.showwarning("警告", "请先在系统配置页设置 Prekey 服务器")
+            return
+
+        import tkinter.simpledialog as _sd
+        passphrase = _sd.askstring("私钥密码", f"[{identity}] 请输入私钥密码:",
+                                     show="*", parent=self.root)
+        if not passphrase:
+            return
+
+        if self._chat_client:
+            try:
+                self._chat_client.stop()
+            except Exception:
+                pass
+        if self._chat_poll_id:
+            self.root.after_cancel(self._chat_poll_id)
+
+        from chat_client import ChatClient
+        self._chat_client = ChatClient(identity, passphrase)
+        self._chat_client._passphrase = passphrase
+        self._chat_client.start()
+        self.chat_status_label.config(text="● 连接中...", foreground="#f1c40f")
+        self._chat_peer = peer
+
+        self._append_chat_msg("system", f"正在连接到 {server_url} ...")
+        self.root.after(2000, self._check_chat_connected)
+
+    def _check_chat_connected(self):
+        if not self._chat_client:
+            return
+        if self._chat_client.connected:
+            self.chat_status_label.config(text="● 已连接", foreground="#27ae60")
+            self._append_chat_msg("system", "已连接到服务器")
+            self._chat_poll_id = self.root.after(2000, self._poll_chat)
+        else:
+            self._append_chat_msg("system", "连接中...")
+            self.root.after(2000, self._check_chat_connected)
+
+        items = self._chat_client.process_inbound()
+        for item in items:
+            if item.get("action") == "server_message":
+                data = item["data"]
+                if data.get("type") == "message":
+                    result = self._chat_client.receive_chat_message(data["msg"])
+                    if result and "error" not in result:
+                        self._display_chat_message(result)
+            elif item.get("action") == "error":
+                self._append_chat_msg("error", item["message"])
+
+    def _poll_chat(self):
+        if not self._chat_client:
+            return
+
+        items = self._chat_client.process_inbound()
+        new_count = 0
+        for item in items:
+            if item.get("action") == "server_message":
+                data = item["data"]
+                if data.get("type") == "message":
+                    result = self._chat_client.receive_chat_message(data["msg"])
+                    if result and "error" not in result:
+                        self._display_chat_message(result)
+                        new_count += 1
+                    elif result and "error" in result:
+                        self._append_chat_msg("error", f"解密失败: {result['error']}")
+            elif item.get("action") == "status":
+                connected = item.get("connected", False)
+                if connected:
+                    self.chat_status_label.config(text="● 已连接", foreground="#27ae60")
+                else:
+                    self.chat_status_label.config(text="● 已断开", foreground="#e74c3c")
+
+        try:
+            poll_results = self._chat_client.poll_messages()
+            for r in poll_results:
+                if "error" not in r:
+                    self._display_chat_message(r)
+                    new_count += 1
+        except Exception:
+            pass
+
+        if new_count:
+            self.chat_new_msg_label.config(text=f"新消息: +{new_count}")
+
+        self._chat_poll_id = self.root.after(2000, self._poll_chat)
+
+    def _display_chat_message(self, result):
+        from datetime import datetime
+        ts = datetime.fromtimestamp(result["timestamp"]).strftime("%H:%M")
+        who = result["from"]
+        text = result["text"]
+        verified = result.get("verified", False)
+
+        self.chat_msg_display.config(state=tk.NORMAL)
+        if who != self.chat_identity_var.get():
+            self.chat_msg_display.insert(tk.END, f"\n{who}  {ts}\n", "peer")
+            self.chat_msg_display.insert(tk.END, f"  {text}\n", "peer_text")
+            if verified:
+                self.chat_msg_display.insert(tk.END, "  (签名已验证)\n", "verified")
+        else:
+            self.chat_msg_display.insert(tk.END, f"\n你  {ts}\n", "me")
+            self.chat_msg_display.insert(tk.END, f"  {text}\n", "me_text")
+
+        self.chat_msg_display.config(state=tk.DISABLED)
+        self.chat_msg_display.see(tk.END)
+
+    def _append_chat_msg(self, tag, text):
+        self.chat_msg_display.config(state=tk.NORMAL)
+        self.chat_msg_display.insert(tk.END, f"[{text}]\n", tag)
+        self.chat_msg_display.config(state=tk.DISABLED)
+        self.chat_msg_display.see(tk.END)
+
+    def _on_chat_send(self):
+        text = self.chat_input.get().strip()
+        if not text:
+            return
+        peer = self._chat_peer or self.chat_peer_var.get()
+        if not peer:
+            messagebox.showwarning("警告", "请先选择对方并连接")
+            return
+        if not self._chat_client:
+            messagebox.showwarning("警告", "请先连接")
+            return
+
+        self.chat_input.delete(0, tk.END)
+
+        try:
+            result = self._chat_client.send_chat_message(peer, text)
+            if result.get("error"):
+                self._append_chat_msg("error", f"发送失败: {result['error']}")
+                return
+
+            self._display_chat_message({
+                "from": self.chat_identity_var.get(),
+                "timestamp": time.time(),
+                "text": text,
+                "verified": True,
+            })
+            self._set_status("消息已发送", 3000)
+        except Exception as e:
+            self._append_chat_msg("error", f"发送失败: {e}")
+
     def _on_about(self):
         messagebox.showinfo("关于 zhcrypt",
                             "zhcrypt v3.0 - 中文加密系统\n\n"
@@ -901,10 +1190,18 @@ class ZhCryptGUI:
                             "功能:\n"
                             "  文本/文件加密 · 数字签名\n"
                             "  前向安全(PFS) · Shamir备份\n"
-                            "  可否认加密 · 密码强度检测\n\n"
+                            "  可否认加密 · 密码强度检测\n"
+                            "  端到端加密聊天 (Double Ratchet)\n\n"
                             "密钥存储: ~\\.zhcrypt\\keys\\")
 
     def _on_close(self):
+        if self._chat_poll_id:
+            self.root.after_cancel(self._chat_poll_id)
+        if self._chat_client:
+            try:
+                self._chat_client.stop()
+            except Exception:
+                pass
         self.root.destroy()
 
     def run(self):

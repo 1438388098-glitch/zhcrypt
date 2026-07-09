@@ -666,10 +666,111 @@ def cmd_set_params(args):
     _warn("新参数仅影响后续加密, 已有密文不受影响")
 
 
+def cmd_chat_send(args):
+    from config import get
+    identity = args.identity or get("default_identity", "default")
+    peer = args.peer
+    passphrase = getpass.getpass(f"[{identity}] 请输入你的私钥密码: ")
+    from chat_client import ChatClient
+    client = ChatClient(identity, passphrase)
+    client.start()
+    time.sleep(1)
+    if args.text:
+        text = args.text
+    else:
+        text = input("消息: ")
+    result = client.send_chat_message(peer, text)
+    if result.get("error"):
+        _error(result["error"])
+    else:
+        _ok(f"已发送 ({result.get('type', 'message')}) id={result.get('msg_id', '?')[:8]}...")
+    client.stop()
+
+
+def cmd_chat_poll(args):
+    from config import get
+    identity = args.identity or get("default_identity", "default")
+    passphrase = getpass.getpass(f"[{identity}] 请输入你的私钥密码: ")
+    from chat_client import ChatClient
+    client = ChatClient(identity, passphrase)
+    client.start()
+    time.sleep(0.5)
+    items = client.process_inbound()
+    for item in items:
+        if item.get("action") == "status":
+            status = "已连接" if item.get("connected") else "未连接"
+            _info(f"WebSocket: {status}")
+        elif item.get("action") == "server_message":
+            data = item["data"]
+            if data.get("type") == "message":
+                result = client.receive_chat_message(data["msg"])
+                if result and "error" not in result:
+                    _ok(f"[{result['from']}] {result['text']}")
+                    if result.get("verified"):
+                        _info("  (签名已验证)")
+                elif result and "error" in result:
+                    _warn(f"  ({result['error']})")
+    polls = client.poll_messages()
+    for r in polls:
+        if "error" not in r:
+            _ok(f"[{r['from']}] {r['text']}")
+    if not items and not polls:
+        _info("暂无新消息")
+    client.stop()
+
+
+def cmd_chat_history(args):
+    from config import get
+    identity = args.identity or get("default_identity", "default")
+    peer = args.peer
+    passphrase = getpass.getpass(f"[{identity}] 请输入你的私钥密码: ")
+    from chat_client import ChatClient
+    client = ChatClient(identity, passphrase)
+    client.start()
+    time.sleep(0.5)
+    msgs = client.get_history(peer, limit=args.limit or 50)
+    if not msgs:
+        _info("无历史消息")
+        client.stop()
+        return
+    for r in msgs:
+        if "error" in r:
+            _warn(f"  (跳过: {r['error']})")
+            continue
+        ts = datetime.datetime.fromtimestamp(r["timestamp"]).strftime("%m-%d %H:%M")
+        label = "签名✓" if r.get("verified") else ""
+        who = r["from"] if r["from"] != identity else "你"
+        _ok(f"[{ts}] {who}: {r['text']}  {label}")
+    client.stop()
+
+
+def cmd_chat_status(args):
+    from config import get
+    identity = args.identity or get("default_identity", "default")
+    from session import list_sessions
+    sessions = list_sessions(identity)
+    if not sessions:
+        _info(f"[{identity}] 暂无活跃会话")
+    else:
+        _ok(f"[{identity}] 会话列表:")
+        for s in sessions:
+            ts = datetime.datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
+            _info(f"  - {s['peer']}  (最后活跃: {ts})")
+
+
+def cmd_chat_delete(args):
+    from config import get
+    identity = args.identity or get("default_identity", "default")
+    peer = args.peer
+    from session import delete_session
+    delete_session(identity, peer)
+    _ok(f"已删除与 {peer} 的会话")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="zhcrypt",
-        description="中文加密系统 v3.0 - 支持签名+PFS+流式加密",
+        description="中文加密系统 v3.0 - 支持签名+PFS+流式加密+安全聊天",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
 示例:
@@ -678,6 +779,8 @@ def main():
   zhcrypt backup default           备份私钥 (5份额)
   zhcrypt restore default          恢复私钥
   zhcrypt strength <password>      测试密码强度
+  zhcrypt chat send bob            向 bob 发送消息
+  zhcrypt chat poll                检查新消息
         """),
     )
 
@@ -767,6 +870,28 @@ def main():
     p_params.add_argument("--mem", type=int, default=None, help="内存成本 MB (默认 256)")
     p_params.add_argument("--par", type=int, default=None, help="并行度 (默认 4)")
 
+    p_chat = sub.add_parser("chat", help="安全聊天 (需配置服务器)")
+
+    p_chat_send = sub.add_parser("chat-send", help="发送聊天消息")
+    p_chat_send.add_argument("text", nargs="?", default=None, help="消息文本")
+    p_chat_send.add_argument("-t", "--peer", required=True, help="对方身份")
+    p_chat_send.add_argument("-i", "--identity", default=None, help="你的身份")
+
+    p_chat_poll = sub.add_parser("chat-poll", help="检查新消息")
+    p_chat_poll.add_argument("-i", "--identity", default=None, help="你的身份")
+
+    p_chat_history = sub.add_parser("chat-history", help="查看聊天历史")
+    p_chat_history.add_argument("-t", "--peer", required=True, help="对方身份")
+    p_chat_history.add_argument("-i", "--identity", default=None, help="你的身份")
+    p_chat_history.add_argument("-n", "--limit", type=int, default=50, help="条数")
+
+    p_chat_status = sub.add_parser("chat-status", help="查看会话状态")
+    p_chat_status.add_argument("-i", "--identity", default=None, help="你的身份")
+
+    p_chat_delete = sub.add_parser("chat-delete", help="删除会话")
+    p_chat_delete.add_argument("-t", "--peer", required=True, help="对方身份")
+    p_chat_delete.add_argument("-i", "--identity", default=None, help="你的身份")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -793,6 +918,12 @@ def main():
         "restore": cmd_restore,
         "strength": cmd_strength,
         "set-params": cmd_set_params,
+        "chat-send": cmd_chat_send,
+        "chat-poll": cmd_chat_poll,
+        "chat-history": cmd_chat_history,
+        "chat-status": cmd_chat_status,
+        "chat-delete": cmd_chat_delete,
+        "chat": cmd_chat_poll,
     }
 
     cmd = commands.get(args.command)
