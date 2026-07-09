@@ -117,6 +117,7 @@ class ChatClient:
         reported_error = False
         import socket as _socket
         import json as _json
+        from websocket import WebSocketConnectionClosedException
         while self._running:
             try:
                 self._connect_ws()

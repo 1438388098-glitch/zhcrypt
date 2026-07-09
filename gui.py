@@ -1101,20 +1101,13 @@ class ZhCryptGUI:
         self.chat_msg_display.tag_configure("error", foreground="#ff3b30", font=("Microsoft YaHei", 8),
                                              justify=tk.CENTER)
 
-        # Bubble tags — peer (left)
+        # Tags — all messages left-aligned
         self.chat_msg_display.tag_configure("p_name", foreground="#1c1c1e", font=("Microsoft YaHei", 8, "bold"),
-                                             lmargin1=4, spacing1=6)
+                                             spacing1=6)
         self.chat_msg_display.tag_configure("p_bubble", foreground="#1c1c1e",
                                              background="#ffffff", lmargin1=8, spacing1=2, spacing3=4)
         self.chat_msg_display.tag_configure("p_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
-                                             lmargin1=12)
-        # Bubble tags — me (right-style via big left margin)
-        self.chat_msg_display.tag_configure("m_name", foreground="#1c1c1e", font=("Microsoft YaHei", 8, "bold"),
-                                             lmargin1=80, spacing1=6)
-        self.chat_msg_display.tag_configure("m_bubble", foreground="#1c1c1e",
-                                             background="#d1e7ff", lmargin1=80, spacing1=2, spacing3=4)
-        self.chat_msg_display.tag_configure("m_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
-                                             lmargin1=80)
+                                             lmargin1=8)
 
         # ---- Input Area (grid) ----
         input_frame = ttk.Frame(main)
@@ -1383,18 +1376,11 @@ class ZhCryptGUI:
 
         self.chat_msg_display.config(state=tk.NORMAL)
         is_me = (who == self.chat_identity_var.get())
-
-        if is_me:
-            self.chat_msg_display.insert(tk.END, f"\n{ts}\n", "m_ts")
-            self.chat_msg_display.insert(tk.END, f"{text}\n", "m_bubble")
-            if verified:
-                self.chat_msg_display.insert(tk.END, "✓ 签名已验证\n", "verified")
-        else:
-            name = who
-            self.chat_msg_display.insert(tk.END, f"\n{name}  {ts}\n", "p_name")
-            self.chat_msg_display.insert(tk.END, f"{text}\n", "p_bubble")
-            if verified:
-                self.chat_msg_display.insert(tk.END, "✓ 签名已验证\n", "verified")
+        display_name = "你" if is_me else who
+        self.chat_msg_display.insert(tk.END, f"\n{display_name}  {ts}\n", "p_name")
+        self.chat_msg_display.insert(tk.END, f"{text}\n", "p_bubble")
+        if verified:
+            self.chat_msg_display.insert(tk.END, "✓ 签名已验证\n", "verified")
 
         self.chat_msg_display.config(state=tk.DISABLED)
         self.chat_msg_display.see(tk.END)
