@@ -117,7 +117,7 @@ class ChatClient:
         reported_error = False
         import socket as _socket
         import json as _json
-        from websocket import WebSocketConnectionClosedException
+        from websocket import WebSocketConnectionClosedException as _WSCE
         while self._running:
             try:
                 self._connect_ws()
@@ -143,7 +143,7 @@ class ChatClient:
                         INBOUND.put({"action": "server_message", "data": data})
                     except _socket.timeout:
                         pass
-                    except websocket.WebSocketConnectionClosedException:
+                    except WebSocketConnectionClosedException:
                         break
                     except Exception:
                         break
@@ -156,7 +156,10 @@ class ChatClient:
 
             except Exception as e:
                 if not reported_error:
-                    INBOUND.put({"action": "error", "message": f"连接失败: {e}"})
+                    import traceback
+                    details = traceback.format_exc().split('\n')
+                    brief = " ".join(l.strip() for l in details[-3:-1] if l.strip())
+                    INBOUND.put({"action": "error", "message": f"连接失败: {e} [{brief}]"})
                     reported_error = True
 
             self._connected = False
@@ -168,13 +171,7 @@ class ChatClient:
                 backoff = min(backoff * 2, self._max_reconnect_delay)
 
     def _connect_ws(self):
-        try:
-            import websocket
-        except ImportError:
-            INBOUND.put({"action": "error", "message": "websocket-client 未安装: pip install websocket-client"})
-            self._running = False
-            return
-
+        import websocket
         self.ws = websocket.create_connection(
             self._ws_url,
             timeout=120,
@@ -186,13 +183,11 @@ class ChatClient:
             "identity": self.identity,
         })
         self.ws.send(auth_msg)
-
         resp = json.loads(self.ws.recv())
         if resp.get("type") != "auth_ok":
             msg = resp.get('message', 'unknown')
             self.ws.close()
             raise ConnectionRefusedError(f"认证失败: {msg}")
-
         self.ws.send(json.dumps({"type": "get_pending"}))
 
     def send_chat_message(self, peer_identity, plaintext):
