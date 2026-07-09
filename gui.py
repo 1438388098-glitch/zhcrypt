@@ -1399,6 +1399,19 @@ class ZhCryptGUI:
         self.chat_msg_display.config(state=tk.DISABLED)
         self.chat_msg_display.see(tk.END)
 
+        # Desktop notification for incoming messages when minimized
+        if not is_me and self.root.state() == "iconic":
+            try:
+                from plyer import notification as _nt
+                _nt.notify(
+                    title=f"{who} 发来消息",
+                    message=text[:60],
+                    app_name="zhcrypt",
+                    timeout=4,
+                )
+            except Exception:
+                pass
+
     def _append_chat_msg(self, tag, text):
         self.chat_msg_display.config(state=tk.NORMAL)
         self.chat_msg_display.insert(tk.END, f"\n{text}\n", tag)
@@ -1477,27 +1490,53 @@ class ZhCryptGUI:
         import os as _os
         fsize = _os.path.getsize(path)
         fname = _os.path.basename(path)
-        if fsize > 500 * 1024:
-            messagebox.showinfo("提示", "文件超过 500KB，暂不支持大文件传输")
+
+        if fsize > 500 * 1024 * 1024:
+            messagebox.showwarning("警告", "文件超过 500MB，不支持传输")
             return
+
+        self._set_status(f"正在发送 {fname} ({fsize//1024}KB)...", 0)
+
         try:
+            import base64, secrets
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
             with open(path, "rb") as f:
                 raw = f.read()
-            from core import encrypt_password_mode, packet_to_b64
-            encrypted = packet_to_b64(encrypt_password_mode(raw.hex(), str(time.time())))
-            msg_obj = {
+            file_key = secrets.token_bytes(32)
+            nonce = secrets.token_bytes(12)
+            aesgcm = AESGCM(file_key)
+            encrypted = aesgcm.encrypt(nonce, raw, None)
+            payload = nonce + encrypted
+            file_b64 = base64.b64encode(payload).decode("ascii")
+
+            if fsize > 500 * 1024:
+                if self._chat_client.ws_ready and self._chat_client.ws:
+                    self._chat_client._send_queue.put_nowait(json.dumps({
+                        "type": "file_upload",
+                        "file_data": file_b64,
+                    }))
+                    key_b64 = base64.b64encode(file_key).decode("ascii")
+                    meta = f"[FILE]{fname}|{fsize}|{key_b64}|uploaded"
+                else:
+                    messagebox.showerror("错误", "WebSocket 未连接，无法上传大文件")
+                    return
+            else:
+                key_b64 = base64.b64encode(file_key).decode("ascii")
+                meta = f"[FILE]{fname}|{fsize}|{key_b64}|{file_b64}"
+
+            self._display_chat_message({
                 "from": self.chat_identity_var.get(),
                 "timestamp": time.time(),
-                "text": f"[文件] {fname} ({fsize//1024}KB)",
+                "text": f"📎 {fname} ({fsize//1024}KB)",
                 "verified": True,
-            }
-            self._display_chat_message(msg_obj)
-            result = self._chat_client.send_chat_message(
-                self._chat_peer, f"[FILE]{fname}|{fsize}|{encrypted}")
+            })
+            result = self._chat_client.send_chat_message(self._chat_peer, meta)
             if result.get("error"):
                 self._append_chat_msg("error", f"文件发送失败: {result['error']}")
+            self._set_status(f"文件已发送: {fname}", 4000)
         except Exception as e:
             self._append_chat_msg("error", f"文件发送失败: {e}")
+            self._set_status("文件发送失败", 3000)
 
     def _on_clear_chat(self):
         self.chat_msg_display.config(state=tk.NORMAL)

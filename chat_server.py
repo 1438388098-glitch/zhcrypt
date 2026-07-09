@@ -14,6 +14,8 @@ import hmac
 import sqlite3
 import asyncio
 import hashlib
+import secrets
+import base64
 
 try:
     import websockets
@@ -33,6 +35,8 @@ PORT = int(os.environ.get("ZHCHAT_WS_PORT", "5003"))
 HOST = os.environ.get("ZHCHAT_WS_HOST", "0.0.0.0")
 MESSAGE_RETENTION_DAYS = int(os.environ.get("ZHCHAT_RETENTION_DAYS", "30"))
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("ZHCHAT_RATE_LIMIT", "30"))
+FILE_DIR = os.path.join(os.path.dirname(DB_PATH), "files")
+os.makedirs(FILE_DIR, exist_ok=True)
 
 connected_clients = {}
 rate_limit_buckets = {}
@@ -296,6 +300,44 @@ async def handler(websocket, path):
                 except Exception:
                     pass
 
+            elif msg_type == "file_upload":
+                if not identity:
+                    continue
+                file_data_b64 = data.get("file_data", "")
+                if not file_data_b64:
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 400, "message": "missing file_data"}))
+                    continue
+                if len(file_data_b64) > 50 * 1024 * 1024:
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 413, "message": "file too large"}))
+                    continue
+                token = secrets.token_hex(16)
+                file_path = os.path.join(FILE_DIR, token)
+                with open(file_path, "wb") as f:
+                    f.write(base64.b64decode(file_data_b64))
+                await websocket.send(json.dumps({
+                    "type": "file_upload_ack",
+                    "token": token,
+                }))
+
+            elif msg_type == "file_download":
+                if not identity:
+                    continue
+                token = data.get("token", "")
+                file_path = os.path.join(FILE_DIR, token)
+                if not os.path.exists(file_path):
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 404, "message": "file not found"}))
+                    continue
+                with open(file_path, "rb") as f:
+                    file_data_b64 = base64.b64encode(f.read()).decode("ascii")
+                await websocket.send(json.dumps({
+                    "type": "file_download_resp",
+                    "file_data": file_data_b64,
+                    "token": token,
+                }))
+
             else:
                 await websocket.send(json.dumps(
                     {"type": "error", "code": 400, "message": f"unknown type: {msg_type}"}))
@@ -316,6 +358,18 @@ async def cleanup_loop():
                 print(f"[cleanup] deleted {deleted} old messages")
         except Exception as e:
             print(f"[cleanup] error: {e}")
+        try:
+            cutoff = _now() - 1800
+            count = 0
+            for fname in os.listdir(FILE_DIR):
+                fpath = os.path.join(FILE_DIR, fname)
+                if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    count += 1
+            if count:
+                print(f"[cleanup] deleted {count} old files")
+        except Exception as e:
+            print(f"[cleanup] file error: {e}")
 
 
 async def main():

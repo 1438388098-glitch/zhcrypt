@@ -228,7 +228,7 @@ class ChatClient:
         state, init_extra = x3dh_initiate_session(
             peer_identity_key_pub_pem=b64d(resp["identity_key_pub"].encode()),
             peer_signed_prekey_pub_pem=b64d(resp["signed_prekey_pub"].encode()),
-            peer_one_time_prekey_pub_b64=None,
+            peer_one_time_prekey_pub_b64=resp.get("one_time_prekey"),
             my_identity_priv_raw=my_id_priv_raw,
             my_identity=self.identity,
             peer_identity=peer_identity,
@@ -369,6 +369,7 @@ class ChatClient:
 
     def _handle_x3dh_init(self, msg):
         from core import urlsafe_b64decode as b64d
+        from cryptography.hazmat.primitives import serialization
 
         self.store.ensure_kem_keys(self.identity, self.passphrase)
 
@@ -384,26 +385,45 @@ class ChatClient:
         my_id_priv_pem = self.store.load_kem_private_key_pem(self.identity, self.passphrase)
         my_id_priv_raw = pem_priv_to_raw(my_id_priv_pem)
 
-        state = x3dh_complete_session(
-            my_identity_priv_raw=my_id_priv_raw,
-            my_signed_prekey_priv_raw=my_id_priv_raw,
-            sender_identity_pub_raw=sender_id_pub_raw,
-            sender_ephemeral_pub_raw=sender_eph_pub_raw,
-            sender_ratchet_pub_raw=sender_ratchet_pub_raw,
-            sender_signing_pub_pem=sender_signing_pub_pem,
-            my_identity=self.identity,
-            sender_identity=sender_identity,
-            session_id=bytes.fromhex(session_id) if session_id else None,
-        )
+        # Load SPK (signed prekey) private key
+        spk_priv_pem = self.store.load_signed_prekey_priv_pem(self.identity, self.passphrase)
+        spk_priv_raw = pem_priv_to_raw(spk_priv_pem) if spk_priv_pem else my_id_priv_raw
 
-        plain = complete_session_first_message(
-            state, sender_ratchet_pub_raw,
-            payload["nonce"], payload["ciphertext"], b"",
-        )
+        # Build trials: (spk_priv, otp_priv) pairs from most to least specific
+        otp_keys = self.store.load_otp_private_keys(self.identity, self.passphrase)
+        trials = [(spk_priv_raw, None)]  # SPK only (2DH + SPK)
+        for _, obj in otp_keys:
+            otp_raw = obj.private_bytes(
+                serialization.Encoding.Raw,
+                serialization.PrivateFormat.Raw,
+                serialization.NoEncryption(),
+            )
+            trials.append((spk_priv_raw, otp_raw))  # SPK + OTP
+        # Also try identity-only as last resort
+        trials.append((my_id_priv_raw, None))
 
-        if plain is not None:
-            save_session(state, self.passphrase)
-            return self._parse_decrypted(plain, msg)
+        for spk, otp_raw in trials:
+            state = x3dh_complete_session(
+                my_identity_priv_raw=my_id_priv_raw,
+                my_signed_prekey_priv_raw=spk,
+                sender_identity_pub_raw=sender_id_pub_raw,
+                sender_ephemeral_pub_raw=sender_eph_pub_raw,
+                sender_ratchet_pub_raw=sender_ratchet_pub_raw,
+                sender_signing_pub_pem=sender_signing_pub_pem,
+                my_identity=self.identity,
+                sender_identity=sender_identity,
+                one_time_prekey_priv_raw=otp_raw if otp_raw else None,
+                session_id=bytes.fromhex(session_id) if session_id else None,
+            )
+
+            plain = complete_session_first_message(
+                state, sender_ratchet_pub_raw,
+                payload["nonce"], payload["ciphertext"], b"",
+            )
+
+            if plain is not None:
+                save_session(state, self.passphrase)
+                return self._parse_decrypted(plain, msg)
 
         return {"error": "X3DH 解密失败"}
 
