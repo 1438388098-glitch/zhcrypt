@@ -566,16 +566,19 @@ class ZhCryptGUI:
         import_row = ttk.Frame(export_import_frame)
         import_row.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(import_row, text="② 粘贴对方公钥束并导入", font=("", 9)).pack(anchor=tk.W)
-        imp_row2 = ttk.Frame(export_import_frame)
-        imp_row2.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(imp_row2, text="公钥束:").pack(side=tk.LEFT, padx=(0, 4))
-        self.import_paste_text = tk.Text(imp_row2, height=2, wrap=tk.WORD,
+        imp_paste_frame = ttk.Frame(export_import_frame)
+        imp_paste_frame.pack(fill=tk.X, pady=(0, 4))
+        self.import_paste_text = tk.Text(imp_paste_frame, height=2, wrap=tk.WORD,
                                           font=("Consolas", 8))
-        self.import_paste_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Label(imp_row2, text="名字:").pack(side=tk.LEFT, padx=(0, 4))
-        self.import_name_entry = ttk.Entry(imp_row2, width=14)
+        self.import_paste_text.pack(fill=tk.X, expand=True)
+        ttk.Label(imp_paste_frame, text="把对方发给你的公钥束粘贴到上方", font=("", 7),
+                  foreground="#999").pack(anchor=tk.W, pady=(2, 0))
+        imp_bottom = ttk.Frame(export_import_frame)
+        imp_bottom.pack(fill=tk.X)
+        ttk.Label(imp_bottom, text="给对方起个名字:").pack(side=tk.LEFT, padx=(0, 4))
+        self.import_name_entry = ttk.Entry(imp_bottom, width=16)
         self.import_name_entry.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(imp_row2, text="导入",
+        ttk.Button(imp_bottom, text="导入对方公钥束",
                    command=self._on_import_bundle).pack(side=tk.LEFT)
 
     def _refresh_identity_list(self):
@@ -1012,7 +1015,7 @@ class ZhCryptGUI:
             return
         try:
             bundle = self.store.generate_prekey_bundle(identity, passphrase, otp_count=50)
-            import urllib.request, ssl, json
+            import urllib.request, ssl, json, urllib.parse
             from config import get_prekey_server, get_auth_token
             url = get_prekey_server()
             token = get_auth_token()
@@ -1020,7 +1023,9 @@ class ZhCryptGUI:
                 messagebox.showerror("错误", "请先在系统配置页设置服务器地址")
                 return
             data = json.dumps(dict(bundle, identity=identity), ensure_ascii=False).encode()
-            req = urllib.request.Request(url + "/v1/prekey/" + identity, data=data, method="POST")
+            req = urllib.request.Request(
+                url + "/v1/prekey/" + urllib.parse.quote(identity, safe=''),
+                data=data, method="POST")
             req.add_header("Authorization", "Bearer " + token)
             req.add_header("Content-Type", "application/json")
             ctx = ssl.create_default_context()

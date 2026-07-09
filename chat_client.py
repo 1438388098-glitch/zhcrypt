@@ -83,9 +83,11 @@ class ChatClient:
         import urllib.request
         import ssl
         import json as _json
+        import urllib.parse
 
         base = self._server_url.rstrip("/")
-        url = f"{base}{path}"
+        encoded_path = urllib.parse.quote(path, safe='/&=?')
+        url = f"{base}{encoded_path}"
 
         data = None
         if body:
