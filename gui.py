@@ -1042,71 +1042,112 @@ class ZhCryptGUI:
         main = ttk.Frame(self.tab_chat, padding=8)
         main.pack(fill=tk.BOTH, expand=True)
 
-        top_row = ttk.Frame(main)
-        top_row.pack(fill=tk.X, pady=(0, 6))
+        # ---- Header ----
+        header = ttk.Frame(main)
+        header.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(top_row, text="对方:").pack(side=tk.LEFT, padx=(0, 4))
-        self.chat_peer_var = tk.StringVar()
-        self.chat_peer_combo = ttk.Combobox(top_row, textvariable=self.chat_peer_var,
-                                             state="readonly", width=20)
-        self.chat_peer_combo.pack(side=tk.LEFT, padx=(0, 8))
-        self.chat_peer_combo.bind("<<ComboboxSelected>>", self._on_chat_select_peer)
-
-        ttk.Label(top_row, text="身份:").pack(side=tk.LEFT, padx=(0, 4))
+        sel_row = ttk.Frame(header)
+        sel_row.pack(fill=tk.X)
+        ttk.Label(sel_row, text="身份:").pack(side=tk.LEFT, padx=(0, 4))
         self.chat_identity_var = tk.StringVar()
-        self.chat_identity_combo = ttk.Combobox(top_row, textvariable=self.chat_identity_var,
+        self.chat_identity_combo = ttk.Combobox(sel_row, textvariable=self.chat_identity_var,
                                                  state="readonly", width=14)
-        self.chat_identity_combo.pack(side=tk.LEFT, padx=(0, 8))
+        self.chat_identity_combo.pack(side=tk.LEFT, padx=(0, 12))
         self.chat_identity_combo.bind("<<ComboboxSelected>>", self._on_chat_identity_change)
 
-        self.chat_connect_btn = ttk.Button(top_row, text="连接", command=self._on_chat_connect)
-        self.chat_connect_btn.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(sel_row, text="对方:").pack(side=tk.LEFT, padx=(0, 4))
+        self.chat_peer_var = tk.StringVar()
+        self.chat_peer_combo = ttk.Combobox(sel_row, textvariable=self.chat_peer_var,
+                                             state="readonly", width=20)
+        self.chat_peer_combo.pack(side=tk.LEFT, padx=(0, 12))
+        self.chat_peer_combo.bind("<<ComboboxSelected>>", self._on_chat_select_peer)
 
-        self.chat_setup_btn = ttk.Button(top_row, text="? 聊天准备步骤", command=self._on_chat_setup_guide)
-        self.chat_setup_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.chat_status_label = ttk.Label(sel_row, text="● 未连接", foreground="#999")
+        self.chat_status_label.pack(side=tk.LEFT, padx=(0, 8))
 
-        self.chat_status_label = ttk.Label(top_row, text="● 未连接", foreground="#999")
-        self.chat_status_label.pack(side=tk.LEFT, padx=(0, 12))
+        self.chat_connect_btn = ttk.Button(sel_row, text="连接", command=self._on_chat_connect)
+        self.chat_connect_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.chat_new_msg_label = ttk.Label(top_row, text="", foreground="#e74c3c", font=("", 9, "bold"))
-        self.chat_new_msg_label.pack(side=tk.LEFT)
+        self.chat_setup_btn = ttk.Button(sel_row, text="?", command=self._on_chat_setup_guide, width=2)
+        self.chat_setup_btn.pack(side=tk.LEFT)
 
+        # ---- Message Display ----
         msg_frame = ttk.Frame(main)
-        msg_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+        msg_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        self.chat_msg_display = tk.Text(msg_frame, height=16, wrap=tk.WORD,
+        self.chat_msg_display = tk.Text(msg_frame, wrap=tk.WORD,
                                          font=("Microsoft YaHei", 10),
-                                         state=tk.DISABLED, bg="#fafafa")
+                                         state=tk.DISABLED, bg="#f5f6f8",
+                                         relief=tk.FLAT, bd=0,
+                                         padx=12, pady=8)
         chat_scroll = ttk.Scrollbar(msg_frame, command=self.chat_msg_display.yview)
         self.chat_msg_display.config(yscrollcommand=chat_scroll.set)
         chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.chat_msg_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.chat_msg_display.tag_configure("peer", foreground="#2c3e50", font=("Microsoft YaHei", 9, "bold"))
-        self.chat_msg_display.tag_configure("peer_text", foreground="#2c3e50", lmargin1=20, lmargin2=20,
-                                             background="#e8e8e8", spacing1=4, spacing3=4)
-        self.chat_msg_display.tag_configure("me", foreground="#1a5276", font=("Microsoft YaHei", 9, "bold"))
-        self.chat_msg_display.tag_configure("me_text", foreground="#1a5276", lmargin1=20, lmargin2=20,
-                                             background="#d4e6f1", spacing1=4, spacing3=4)
-        self.chat_msg_display.tag_configure("verified", foreground="#27ae60", font=("Microsoft YaHei", 7))
-        self.chat_msg_display.tag_configure("unverified", foreground="#e67e22", font=("Microsoft YaHei", 7))
-        self.chat_msg_display.tag_configure("system", foreground="#999", font=("Microsoft YaHei", 8))
-        self.chat_msg_display.tag_configure("error", foreground="#e74c3c", font=("Microsoft YaHei", 8))
+        # Tags
+        self.chat_msg_display.tag_configure("ts", foreground="#8e8e93", font=("Microsoft YaHei", 7))
+        self.chat_msg_display.tag_configure("verified", foreground="#34c759", font=("Microsoft YaHei", 7))
+        self.chat_msg_display.tag_configure("system", foreground="#8e8e93", font=("Microsoft YaHei", 8),
+                                             justify=tk.CENTER)
+        self.chat_msg_display.tag_configure("error", foreground="#ff3b30", font=("Microsoft YaHei", 8),
+                                             justify=tk.CENTER)
 
-        input_row = ttk.Frame(main)
+        # Bubble tags — peer (left)
+        self.chat_msg_display.tag_configure("p_name", foreground="#1c1c1e", font=("Microsoft YaHei", 8, "bold"),
+                                             lmargin1=4, spacing1=6)
+        self.chat_msg_display.tag_configure("p_bubble", foreground="#1c1c1e",
+                                             background="#ffffff", lmargin1=4, lmargin2=0,
+                                             rmargin1=80, spacing1=2, spacing3=4,
+                                             wrap=tk.WORD)
+        self.chat_msg_display.tag_configure("p_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
+                                             lmargin1=8, spacing2=4)
+        # Bubble tags — me (right)
+        self.chat_msg_display.tag_configure("m_name", foreground="#1c1c1e", font=("Microsoft YaHei", 8, "bold"),
+                                             rmargin1=4, spacing1=6)
+        self.chat_msg_display.tag_configure("m_bubble", foreground="#1c1c1e",
+                                             background="#d1e7ff", lmargin1=80, lmargin2=0,
+                                             rmargin1=4, spacing1=2, spacing3=4,
+                                             wrap=tk.WORD)
+        self.chat_msg_display.tag_configure("m_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
+                                             rmargin1=8, spacing2=4)
+
+        # ---- Input Area ----
+        input_frame = ttk.Frame(main)
+        input_frame.pack(fill=tk.X)
+
+        btn_row = ttk.Frame(input_frame)
+        btn_row.pack(fill=tk.X, pady=(0, 4))
+
+        self.chat_emoji_btn = ttk.Button(btn_row, text="😊", width=3, command=self._on_emoji_picker)
+        self.chat_emoji_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.chat_file_btn = ttk.Button(btn_row, text="📎", width=3, command=self._on_chat_send_file)
+        self.chat_file_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.chat_clear_btn = ttk.Button(btn_row, text="清空", width=4, command=self._on_clear_chat)
+        self.chat_clear_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        input_row = ttk.Frame(input_frame)
         input_row.pack(fill=tk.X)
 
-        self.chat_input = ttk.Entry(input_row, font=("Microsoft YaHei", 10))
+        self.chat_input = tk.Text(input_row, height=2, wrap=tk.WORD,
+                                   font=("Microsoft YaHei", 10),
+                                   relief=tk.FLAT, bd=0,
+                                   highlightthickness=1,
+                                   highlightbackground="#d1d1d6",
+                                   padx=8, pady=6)
         self.chat_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self.chat_input.bind("<Return>", lambda e: self._on_chat_send())
+        self.chat_input.bind("<Return>", self._on_chat_input_enter)
+        self.chat_input.bind("<Shift-Return>", lambda e: None)
 
-        self.chat_send_btn = ttk.Button(input_row, text="发送", command=self._on_chat_send)
-        self.chat_send_btn.pack(side=tk.LEFT)
+        self.chat_send_btn = ttk.Button(input_row, text="发送  ➤", command=self._on_chat_send)
+        self.chat_send_btn.pack(side=tk.RIGHT)
 
         bottom_row = ttk.Frame(main)
         bottom_row.pack(fill=tk.X, pady=(4, 0))
-        self.chat_enc_status = ttk.Label(bottom_row, text="E2E 加密中 | X3DH + Double Ratchet",
-                                          font=("Microsoft YaHei", 7), foreground="#999")
+        self.chat_enc_status = ttk.Label(bottom_row, text="E2E 加密中",
+                                          font=("Microsoft YaHei", 7), foreground="#8e8e93")
         self.chat_enc_status.pack(side=tk.LEFT)
 
         self._refresh_chat_contacts()
@@ -1337,31 +1378,37 @@ class ZhCryptGUI:
     def _display_chat_message(self, result):
         from datetime import datetime
         ts = datetime.fromtimestamp(result["timestamp"]).strftime("%H:%M")
+        date_str = datetime.fromtimestamp(result["timestamp"]).strftime("%m/%d")
         who = result["from"]
         text = result["text"]
         verified = result.get("verified", False)
 
         self.chat_msg_display.config(state=tk.NORMAL)
-        if who != self.chat_identity_var.get():
-            self.chat_msg_display.insert(tk.END, f"\n{who}  {ts}\n", "peer")
-            self.chat_msg_display.insert(tk.END, f"  {text}\n", "peer_text")
+        is_me = (who == self.chat_identity_var.get())
+
+        if is_me:
+            self.chat_msg_display.insert(tk.END, f"\n{ts}\n", "m_ts")
+            self.chat_msg_display.insert(tk.END, f"{text}\n", "m_bubble")
             if verified:
-                self.chat_msg_display.insert(tk.END, "  (签名已验证)\n", "verified")
+                self.chat_msg_display.insert(tk.END, "✓ 签名已验证\n", "verified")
         else:
-            self.chat_msg_display.insert(tk.END, f"\n你  {ts}\n", "me")
-            self.chat_msg_display.insert(tk.END, f"  {text}\n", "me_text")
+            name = who
+            self.chat_msg_display.insert(tk.END, f"\n{name}  {ts}\n", "p_name")
+            self.chat_msg_display.insert(tk.END, f"{text}\n", "p_bubble")
+            if verified:
+                self.chat_msg_display.insert(tk.END, "✓ 签名已验证\n", "verified")
 
         self.chat_msg_display.config(state=tk.DISABLED)
         self.chat_msg_display.see(tk.END)
 
     def _append_chat_msg(self, tag, text):
         self.chat_msg_display.config(state=tk.NORMAL)
-        self.chat_msg_display.insert(tk.END, f"[{text}]\n", tag)
+        self.chat_msg_display.insert(tk.END, f"\n{text}\n", tag)
         self.chat_msg_display.config(state=tk.DISABLED)
         self.chat_msg_display.see(tk.END)
 
     def _on_chat_send(self):
-        text = self.chat_input.get().strip()
+        text = self.chat_input.get("1.0", "end-1c").strip()
         if not text:
             return
         peer = self._chat_peer or self.chat_peer_var.get()
@@ -1372,7 +1419,7 @@ class ZhCryptGUI:
             messagebox.showwarning("警告", "请先连接")
             return
 
-        self.chat_input.delete(0, tk.END)
+        self.chat_input.delete("1.0", tk.END)
 
         try:
             result = self._chat_client.send_chat_message(peer, text)
@@ -1386,9 +1433,79 @@ class ZhCryptGUI:
                 "text": text,
                 "verified": True,
             })
-            self._set_status("消息已发送", 3000)
+            self._set_status("已发送", 3000)
         except Exception as e:
             self._append_chat_msg("error", f"发送失败: {e}")
+
+    def _on_chat_input_enter(self, event=None):
+        self._on_chat_send()
+        return "break"
+
+    def _on_emoji_picker(self):
+        emojis = [
+            "😊", "😂", "😍", "🥰", "😘", "😅", "🤣", "👍",
+            "👎", "✌", "🤞", "👊", "❤️", "💔", "🔥", "⭐",
+            "🎉", "🎊", "💯", "✅", "❌", "✔", "⚠", "❗",
+            "👋", "🙏", "💪", "🤗", "😢", "😤", "🥺", "😎",
+            "🫡", "🤔", "🙄", "😴", "🥱", "😈", "👀", "💀",
+        ]
+        picker = tk.Toplevel(self.root)
+        picker.title("选择 Emoji")
+        picker.resizable(False, False)
+        picker.transient(self.root)
+        picker.grab_set()
+        for i, em in enumerate(emojis):
+            r, c = divmod(i, 8)
+            btn = tk.Button(picker, text=em, font=("Segoe UI Emoji", 14),
+                           width=2, relief=tk.FLAT, bd=0,
+                           command=lambda e=em: self._insert_emoji(e, picker))
+            btn.grid(row=r, column=c, padx=1, pady=1)
+        picker.geometry("+%d+%d" % (self.root.winfo_pointerx(), self.root.winfo_pointery()))
+
+    def _insert_emoji(self, em, picker):
+        try:
+            self.chat_input.insert(tk.INSERT, em)
+        except tk.TclError:
+            pass
+        picker.destroy()
+
+    def _on_chat_send_file(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(title="选择要发送的文件")
+        if not path:
+            return
+        if not self._chat_client or not self._chat_peer:
+            messagebox.showwarning("警告", "请先连接聊天")
+            return
+        import os as _os
+        fsize = _os.path.getsize(path)
+        fname = _os.path.basename(path)
+        if fsize > 500 * 1024:
+            messagebox.showinfo("提示", "文件超过 500KB，暂不支持大文件传输")
+            return
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            from core import encrypt_password_mode, packet_to_b64
+            encrypted = packet_to_b64(encrypt_password_mode(raw.hex(), str(time.time())))
+            msg_obj = {
+                "from": self.chat_identity_var.get(),
+                "timestamp": time.time(),
+                "text": f"[文件] {fname} ({fsize//1024}KB)",
+                "verified": True,
+            }
+            self._display_chat_message(msg_obj)
+            result = self._chat_client.send_chat_message(
+                self._chat_peer, f"[FILE]{fname}|{fsize}|{encrypted}")
+            if result.get("error"):
+                self._append_chat_msg("error", f"文件发送失败: {result['error']}")
+        except Exception as e:
+            self._append_chat_msg("error", f"文件发送失败: {e}")
+
+    def _on_clear_chat(self):
+        self.chat_msg_display.config(state=tk.NORMAL)
+        self.chat_msg_display.delete("1.0", tk.END)
+        self.chat_msg_display.config(state=tk.DISABLED)
 
     def _on_help_chat(self):
         messagebox.showinfo("聊天功能教程",

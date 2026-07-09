@@ -45,6 +45,7 @@ class ChatClient:
         self._ws_ready = False
         self._reconnect_delay = 1
         self._max_reconnect_delay = 60
+        self._send_queue = queue.Queue()
 
         self._server_url = get_prekey_server()
         self._token = get_auth_token()
@@ -114,6 +115,8 @@ class ChatClient:
     def _ws_loop(self):
         backoff = self._reconnect_delay
         reported_error = False
+        import socket as _socket
+        import json as _json
         while self._running:
             try:
                 self._connect_ws()
@@ -125,13 +128,30 @@ class ChatClient:
 
                 while self._running:
                     try:
+                        self.ws.sock.settimeout(1.0)
+                    except Exception:
+                        pass
+                    try:
                         raw = self.ws.recv()
                         if raw is None:
                             break
-                        data = json.loads(raw)
+                        try:
+                            data = _json.loads(raw)
+                        except _json.JSONDecodeError:
+                            continue
                         INBOUND.put({"action": "server_message", "data": data})
+                    except _socket.timeout:
+                        pass
+                    except websocket.WebSocketConnectionClosedException:
+                        break
                     except Exception:
                         break
+                    try:
+                        while True:
+                            send_item = self._send_queue.get_nowait()
+                            self.ws.send(send_item)
+                    except queue.Empty:
+                        pass
 
             except Exception as e:
                 if not reported_error:
@@ -156,7 +176,7 @@ class ChatClient:
 
         self.ws = websocket.create_connection(
             self._ws_url,
-            timeout=10,
+            timeout=120,
             sslopt={"cert_reqs": 0} if "wss://" in self._ws_url else {},
         )
         auth_msg = json.dumps({
@@ -168,10 +188,9 @@ class ChatClient:
 
         resp = json.loads(self.ws.recv())
         if resp.get("type") != "auth_ok":
-            INBOUND.put({"action": "error", "message": f"认证失败: {resp.get('message', 'unknown')}"})
+            msg = resp.get('message', 'unknown')
             self.ws.close()
-            self._running = False
-            return
+            raise ConnectionRefusedError(f"认证失败: {msg}")
 
         self.ws.send(json.dumps({"type": "get_pending"}))
 
@@ -281,7 +300,8 @@ class ChatClient:
 
     def _send_via_ws(self, msg):
         try:
-            self.ws.send(json.dumps({"type": "send", "msg": msg}, ensure_ascii=False))
+            self._send_queue.put_nowait(
+                json.dumps({"type": "send", "msg": msg}, ensure_ascii=False))
             return None
         except Exception as e:
             result = self._http_request("POST", "/v1/messages/send", msg)
