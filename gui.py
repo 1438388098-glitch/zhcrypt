@@ -207,7 +207,7 @@ class ZhCryptGUI:
         ttk.Button(btn_row, text="解密", command=self._on_text_decrypt).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="复制密文", command=self._on_copy_output).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="清空", command=self._on_clear_text).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btn_row, text="🔑临时口令", command=self._on_temp_share).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="临时口令", command=self._on_temp_share).pack(side=tk.LEFT)
         ToolTip(btn_row.winfo_children()[-1],
                 "生成随机中文词口令(4词组合)，加密后口令只显示一次。\n适合临时分享：将口令+密文分别发给对方。")
 
@@ -814,12 +814,17 @@ class ZhCryptGUI:
         cfg["prekey_server"]["url"] = self.cfg_pk_url_var.get().rstrip("/")
         save(cfg)
         self._set_status("Prekey 服务器配置已保存", 4000)
+
+    def _refresh_hybrid_identities(self):
         try:
             identities = [id_["identity"] for id_ in self.store.list_identities()]
         except Exception:
             identities = []
-        self.hybrid_sender_combo["values"] = identities
-        self.hybrid_receiver_combo["values"] = identities
+        try:
+            self.hybrid_sender_combo["values"] = identities
+            self.hybrid_receiver_combo["values"] = identities
+        except Exception:
+            pass
         if identities:
             if not self.hybrid_sender_var.get():
                 self.hybrid_sender_var.set(identities[0])
