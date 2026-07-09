@@ -359,7 +359,6 @@ def x3dh_initiate_session(
     peer_signing_pub_pem,
 ):
     peer_id_pub = deserialize_x25519_pub(peer_identity_key_pub_pem)
-    peer_spk_pub = deserialize_x25519_pub(peer_signed_prekey_pub_pem)
 
     eph_priv_raw, eph_pub_raw = generate_x25519_keypair_raw()
     my_id_pub = priv_from_raw(my_identity_priv_raw).public_key()
@@ -367,15 +366,10 @@ def x3dh_initiate_session(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     )
 
-    dh1 = x25519_ecdh_raw(eph_priv_raw, _pem_pub_to_raw(peer_spk_pub))
+    dh1 = x25519_ecdh_raw(eph_priv_raw, _pem_pub_to_raw(peer_id_pub))
     dh2 = x25519_ecdh_raw(my_identity_priv_raw, _pem_pub_to_raw(peer_id_pub))
 
     dh_bytes = dh1 + dh2
-
-    if peer_one_time_prekey_pub_b64:
-        peer_otp_pub = deserialize_x25519_pub(_b64d(peer_one_time_prekey_pub_b64))
-        dh3 = x25519_ecdh_raw(eph_priv_raw, _pem_pub_to_raw(peer_otp_pub))
-        dh_bytes += dh3
 
     root_key = HKDF(
         algorithm=hashes.SHA256(),
@@ -384,18 +378,19 @@ def x3dh_initiate_session(
         info=b"zhchat-session-root-v1",
     ).derive(dh_bytes)
 
+    session_id = secrets.token_bytes(16)
+
     our_ratchet_priv, our_ratchet_pub = generate_x25519_keypair_raw()
 
     hkdf_init = HKDF(
         algorithm=hashes.SHA256(),
-        length=KEY_SIZE * 2,
+        length=KEY_SIZE * 4,
         salt=root_key,
-        info=b"zhchat-init-send-chain",
+        info=b"zhchat-init-chains-v1",
     )
     chain_material = hkdf_init.derive(our_ratchet_pub)
     send_chain_key = chain_material[:KEY_SIZE]
 
-    session_id = secrets.token_bytes(16)
     their_ratchet_pub = b"\x00" * 32
 
     state = SessionState(
@@ -430,6 +425,7 @@ def x3dh_complete_session(
     my_identity,
     sender_identity,
     one_time_prekey_priv_raw=None,
+    session_id=None,
 ):
     dh1 = x25519_ecdh_raw(my_signed_prekey_priv_raw, sender_ephemeral_pub_raw)
     dh2 = x25519_ecdh_raw(my_identity_priv_raw, sender_identity_pub_raw)
@@ -447,7 +443,8 @@ def x3dh_complete_session(
         info=b"zhchat-session-root-v1",
     ).derive(dh_bytes)
 
-    session_id = secrets.token_bytes(16)
+    if session_id is None:
+        session_id = secrets.token_bytes(16)
 
     CKr = b"\x00" * KEY_SIZE
     Nr = 0
@@ -480,7 +477,7 @@ def complete_session_first_message(state, sender_ratchet_pub_raw, nonce_b64, cip
         algorithm=hashes.SHA256(),
         length=KEY_SIZE * 4,
         salt=state.root_key,
-        info=b"zhchat-init-recv-chains",
+        info=b"zhchat-init-chains-v1",
     )
     chain_material = hkdf_init.derive(sender_ratchet_pub_raw)
     state.recv_chain_key = chain_material[:KEY_SIZE]

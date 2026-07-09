@@ -24,7 +24,7 @@ from ratchet import (
     SessionState, send_message, receive_message, try_decrypt_skipped,
     x3dh_initiate_session, x3dh_complete_session,
     complete_session_first_message,
-    pem_priv_to_raw, raw_to_pem_pub, _b64, _b64d,
+    pem_priv_to_raw, raw_to_pem_pub, _b64, _b64d, KEY_SIZE, KDF_CK,
     x3dh_reply_msg,
 )
 from session import save_session, load_session, list_sessions, delete_session
@@ -190,12 +190,10 @@ class ChatClient:
         except Exception:
             pass
 
-        otp_b64 = resp.get("one_time_prekey")
-
         state, init_extra = x3dh_initiate_session(
             peer_identity_key_pub_pem=b64d(resp["identity_key_pub"].encode()),
             peer_signed_prekey_pub_pem=b64d(resp["signed_prekey_pub"].encode()),
-            peer_one_time_prekey_pub_b64=otp_b64,
+            peer_one_time_prekey_pub_b64=None,
             my_identity_priv_raw=my_id_priv_raw,
             my_identity=self.identity,
             peer_identity=peer_identity,
@@ -275,32 +273,47 @@ class ChatClient:
     def receive_chat_message(self, msg):
         peer_identity = msg["from"]
         state = load_session(self.identity, peer_identity, self.passphrase)
+        import sys as _sys
 
         msg_type = msg.get("type", "message")
 
         if state is None:
-            if msg_type == "x3dh_init":
+            if msg_type in ("x3dh_init",):
                 return self._handle_x3dh_init(msg)
             else:
                 return {"error": f"收到 {peer_identity} 的消息但无会话状态",
                         "recovery": "请通知对方重新发起会话"}
 
         if msg_type == "x3dh_init":
+            return self._handle_x3dh_init(msg)
+
+        if msg_type == "x3dh_reply":
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+            from cryptography.hazmat.primitives import hashes
             payload = msg["payload"]
-
             sender_ratchet_pub_raw = _b64d(payload["ratchet_public_key"])
-            sender_signing_pub = _b64d(payload.get("signing_public_key", "")) if payload.get("signing_public_key") else b""
-
-            plain = complete_session_first_message(
-                state, sender_ratchet_pub_raw,
-                payload["nonce"], payload["ciphertext"], b"",
-            )
-
-            if plain is None:
-                return {"error": "解密 x3dh_init 消息失败"}
-
-            save_session(state, self.passphrase)
-            return self._parse_decrypted(plain, msg)
+            state.their_ratchet_pub = sender_ratchet_pub_raw
+            hkdf_init = HKDF(hashes.SHA256(), KEY_SIZE * 4,
+                salt=state.root_key, info=b"zhchat-init-chains-v1")
+            cm = hkdf_init.derive(state.our_ratchet_pub)
+            recv_half = cm[KEY_SIZE:KEY_SIZE * 2]
+            send_half = cm[:KEY_SIZE]
+            sid = state.session_id
+            if not isinstance(sid, bytes): sid = sid.encode()
+            nonce = _b64d(payload["nonce"])
+            ct = _b64d(payload["ciphertext"])
+            CKr, MK = KDF_CK(recv_half)
+            try:
+                a = AESGCM(MK)
+                plain = a.decrypt(nonce, ct, sid)
+                state.recv_chain_key = CKr
+                state.send_chain_key = send_half
+                state.recv_msg_number += 1
+                save_session(state, self.passphrase)
+                return self._parse_decrypted(plain, msg)
+            except Exception:
+                return None
 
         plain = receive_message(state, msg)
         if plain is None:
@@ -319,33 +332,21 @@ class ChatClient:
         sender_ratchet_pub_raw = _b64d(payload["ratchet_public_key"])
         sender_signing_pub_pem = _b64d(payload.get("signing_public_key", "")) if payload.get("signing_public_key") else b""
         sender_identity = msg["from"]
+        session_id = msg.get("session_id", "")
 
         my_id_priv_pem = self.store.load_kem_private_key_pem(self.identity, self.passphrase)
         my_id_priv_raw = pem_priv_to_raw(my_id_priv_pem)
 
-        my_spk_priv_raw = None
-        otp_priv_raw = None
-
-        otp_keys = self.store.load_otp_private_keys(self.identity, self.passphrase)
-        if otp_keys:
-            otp_priv_raw = pem_priv_to_raw(
-                self.store.load_kem_private_key_pem(self.identity, self.passphrase)
-            )
-            my_spk_priv_raw = otp_priv_raw
-
-        if my_spk_priv_raw is None:
-            my_spk_priv_raw = my_id_priv_raw
-
         state = x3dh_complete_session(
             my_identity_priv_raw=my_id_priv_raw,
-            my_signed_prekey_priv_raw=my_spk_priv_raw,
+            my_signed_prekey_priv_raw=my_id_priv_raw,
             sender_identity_pub_raw=sender_id_pub_raw,
             sender_ephemeral_pub_raw=sender_eph_pub_raw,
             sender_ratchet_pub_raw=sender_ratchet_pub_raw,
             sender_signing_pub_pem=sender_signing_pub_pem,
             my_identity=self.identity,
             sender_identity=sender_identity,
-            one_time_prekey_priv_raw=otp_priv_raw,
+            session_id=bytes.fromhex(session_id) if session_id else None,
         )
 
         plain = complete_session_first_message(
@@ -353,11 +354,11 @@ class ChatClient:
             payload["nonce"], payload["ciphertext"], b"",
         )
 
-        if plain is None:
-            return {"error": "X3DH 解密失败"}
+        if plain is not None:
+            save_session(state, self.passphrase)
+            return self._parse_decrypted(plain, msg)
 
-        save_session(state, self.passphrase)
-        return self._parse_decrypted(plain, msg)
+        return {"error": "X3DH 解密失败"}
 
     def send_x3dh_reply(self, peer_identity, plaintext):
         state = load_session(self.identity, peer_identity, self.passphrase)

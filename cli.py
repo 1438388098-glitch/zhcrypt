@@ -27,6 +27,9 @@ import getpass
 import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+LIBDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+if os.path.isdir(LIBDIR):
+    sys.path.insert(0, LIBDIR)
 
 from core import (
     __version__,

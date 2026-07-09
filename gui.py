@@ -11,7 +11,11 @@ import time
 import tempfile
 import threading
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE)
+LIBDIR = os.path.join(BASE, "lib")
+if os.path.isdir(LIBDIR):
+    sys.path.insert(0, LIBDIR)
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -123,6 +127,12 @@ class ZhCryptGUI:
         file_menu.add_command(label="退出", command=self._on_close)
         menubar.add_cascade(label="文件", menu=file_menu)
         help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="聊天教程", command=self._on_help_chat)
+        help_menu.add_command(label="混合加密教程", command=self._on_help_hybrid)
+        help_menu.add_command(label="文件加密教程", command=self._on_help_file)
+        help_menu.add_command(label="文本加密教程", command=self._on_help_text)
+        help_menu.add_command(label="密钥管理教程", command=self._on_help_keys)
+        help_menu.add_separator()
         help_menu.add_command(label="关于", command=self._on_about)
         menubar.add_cascade(label="帮助", menu=help_menu)
 
@@ -1177,6 +1187,153 @@ class ZhCryptGUI:
             self._set_status("消息已发送", 3000)
         except Exception as e:
             self._append_chat_msg("error", f"发送失败: {e}")
+
+    def _on_help_chat(self):
+        messagebox.showinfo("聊天功能教程",
+            "安全聊天 (E2E 端到端加密)\n"
+            "========================\n\n"
+            "原理是什么？\n"
+            "每条消息在发送前用你的密钥加密，只有对方能解开。\n"
+            "服务器只负责转发密文，完全看不懂内容。\n"
+            "即使服务器被攻击，你的聊天记录也是安全的。\n\n"
+            "核心技术：X3DH + Double Ratchet\n"
+            "第一条消息通过三重 DH 密钥交换建立会话。\n"
+            "之后每条消息都用独立的密钥（棘轮），一条密钥只用于一条消息。\n"
+            "这意味着即使某条消息的密钥泄露，其他消息也无法解密。\n\n"
+            "使用步骤：\n\n"
+            "1. 前提准备（双方都要做）\n"
+            "   a) 打开「系统配置」标签，设置服务器地址：https://iweistoicqc5.top\n"
+            "   b) 点击「测试连接」确认服务器可达\n"
+            "   c) 打开「混合模式」标签，选择你的身份，输入私钥密码\n"
+            "   d) 点击「上传 Prekey」把密钥注册到服务器\n\n"
+            "2. 交换公钥\n"
+            "   a) 你：点击「导出完整公钥束」→ 把得到的 Base64 发给对方\n"
+            "   b) 对方：点击「导入完整公钥束」→ 粘贴你的公钥\n"
+            "   c) 对方也把公钥发给你，你同样导入\n\n"
+            "3. 开始聊天\n"
+            "   a) 打开「聊天」标签\n"
+            "   b) 在「身份」下拉框选择你自己\n"
+            "   c) 在「对方」下拉框选择聊天对象\n"
+            "   d) 点「连接」按钮，输入你的私钥密码\n"
+            "   e) 看到「已连接」绿色状态后，在输入框打字\n"
+            "   f) 按回车或点「发送」\n\n"
+            "4. 消息安全标识\n"
+            "   (签名已验证) = 对方身份已确认，消息未被篡改\n"
+            "   (未签名) = 消息内容正确但身份未验证\n"
+            "   红色错误 = 消息可能被篡改，请谨慎\n\n"
+            "5. 命令行方式（备用）\n"
+            "   zhcrypt chat-send -t 对方 消息内容\n"
+            "   zhcrypt chat-poll    # 检查新消息\n"
+            "   zhcrypt chat-history -t 对方  # 查看历史\n\n"
+            "常见问题：\n"
+            "Q: 连接失败？\n"
+            "A: 检查服务器地址、token，确认对方已上传 prekey。\n"
+            "Q: 收到消息但解密失败？\n"
+            "A: 关闭 GUI 重新打开，会自动重新握手。\n"
+            "Q: 能不能发文件？\n"
+            "A: v1 暂不支持文件传输，请用「文件加密」标签加密后用其他方式发送。")
+
+    def _on_help_hybrid(self):
+        messagebox.showinfo("混合加密教程",
+            "混合加密 (RSA-4096 + AES-256-GCM)\n"
+            "==================================\n\n"
+            "原理：\n"
+            "用接收方的 RSA 公钥加密一个随机 AES 密钥，\n"
+            "实际内容用 AES 加密。结合了非对称加密的安全分发\n"
+            "和对称加密的快速性能。\n\n"
+            "使用步骤：\n"
+            "1. 确保已导入对方的公钥（在「密钥管理」标签中）\n"
+            "2. 打开「混合模式」标签\n"
+            "3. 在上方输入框写消息\n"
+            "4. 选择你的身份（发送方）和对方身份（接收方）\n"
+            "5. 输入你的私钥密码\n"
+            "6. 点「加密」→ 密文出现在下方\n"
+            "7. 把密文通过任意渠道发给对方\n\n"
+            "对方收到后：\n"
+            "1. 把密文粘贴到输入框\n"
+            "2. 选择自己的身份，输入自己的私钥密码\n"
+            "3. 点「解密」→ 看到原文\n\n"
+            "三种模式：\n"
+            "RSA 模式：仅加密，无签名\n"
+            "带签名模式：加密 + Ed25519 数字签名，防冒充\n"
+            "PFS 模式：前向安全，密钥不长期留存")
+
+    def _on_help_file(self):
+        messagebox.showinfo("文件加密教程",
+            "文件加密 (流式分块 + AES-256-GCM)\n"
+            "================================\n\n"
+            "原理：\n"
+            "文件被分成多个小块，每块用独立的 AES 密钥加密。\n"
+            "即使文件有 10GB，内存中只占用一个块的大小。\n"
+            "每块的密钥从主密钥单向派生，无法从单块密钥反推其他块。\n\n"
+            "使用步骤：\n"
+            "1. 打开「文件加解密」标签\n"
+            "2. 点击「选择文件」选要操作的文件\n"
+            "3. 输入密码\n"
+            "4. 点「加密」或「解密」\n\n"
+            "加密后：\n"
+            "- 小于 10MB：生成 .zen 文件（全量加密）\n"
+            "- 大于 10MB：生成 .zhs 文件（流式加密）\n\n"
+            "解密后：\n"
+            "- 自动恢复原始文件名\n"
+            "- 如果输出文件已存在会提示确认覆盖\n\n"
+            "安全提示：\n"
+            "加密后删除原始文件前请确认解密正常。\n"
+            "密码请通过不同于文件传输的渠道告知对方。")
+
+    def _on_help_text(self):
+        messagebox.showinfo("文本加密教程",
+            "文本加密 (Argon2id + AES-256-GCM)\n"
+            "=================================\n\n"
+            "原理：\n"
+            "你输入的密码通过 Argon2id 算法（256MB 内存硬化）\n"
+            "派生为 256 位 AES 密钥，然后加密文本。\n"
+            "每次加密使用随机盐值，相同密码每次产生不同密文。\n\n"
+            "使用步骤：\n"
+            "1. 打开「文本加解密」标签\n"
+            "2. 在上方输入框写入或粘贴明文\n"
+            "3. 输入加密密码\n"
+            "4. 点「加密」→ 底部出现 Base64 密文\n"
+            "5. 把密文复制发给对方\n\n"
+            "密码强度条说明：\n"
+            "红色 = 弱（纯数字或短密码，容易破解）\n"
+            "橙色 = 中（混合字母数字）\n"
+            "绿色 = 强（大写+小写+数字+符号，12位以上）\n"
+            "极强 = 80 bits 以上（几乎不可能暴力破解）\n\n"
+            "临时口令功能：\n"
+            "点「临时口令」生成 4 个随机中文词的密码，\n"
+            "只用一次就丢。适合临时分享文件。\n"
+            "口令只显示一次，请立即复制。")
+
+    def _on_help_keys(self):
+        messagebox.showinfo("密钥管理教程",
+            "密钥管理\n"
+            "========\n\n"
+            "zhcrypt 使用三套密钥体系：\n"
+            "RSA-4096：用于混合加密（公钥加密 + 私钥解密）\n"
+            "Ed25519：用于数字签名（验证消息来源）\n"
+            "X25519： 用于前向安全密钥交换（X3DH）\n\n"
+            "基本操作：\n\n"
+            "1. 初始化身份\n"
+            "   文件菜单 → 初始化身份\n"
+            "   输入身份名和密码 → 生成三套密钥\n"
+            "   密钥存储在 ~/.zhcrypt/keys/ 目录\n\n"
+            "2. 导出公钥束\n"
+            "   选择身份 → 点「导出完整公钥束」\n"
+            "   得到 Base64 字符串，发给通信对方\n\n"
+            "3. 导入对方公钥\n"
+            "   收到对方的公钥束 → 点「导入公钥束」\n"
+            "   粘贴 → 输入一个名字（如对方的身份名）\n\n"
+            "4. 备份私钥（Shamir 秘密分享）\n"
+            "   选择身份 → 输入密码 → 点「备份私钥」\n"
+            "   生成 5 份份额文件，任何一个 3 份即可恢复\n"
+            "   适合分给多个信任的人保管\n\n"
+            "5. 恢复私钥\n"
+            "   点「恢复私钥」→ 选择 3 份份额文件 → 还原私钥\n\n"
+            "安全提醒：\n"
+            "私钥密码不要有规律，建议 16 位以上混合字符。\n"
+            "公钥可以公开分享，私钥绝不外传。\n"
+            "备份份额分布在至少 3 个不同地点。")
 
     def _on_about(self):
         messagebox.showinfo("关于 zhcrypt",

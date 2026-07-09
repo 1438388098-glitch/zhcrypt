@@ -266,7 +266,7 @@ class KeyStore:
         for ext in [".pub", ".key", ".meta",
                     ".ed25519", ".ed25519.pub",
                     ".x25519", ".x25519.pub",
-                    ".otpkeys", ".backup"]:
+                    ".otpkeys", ".backup", ".spk"]:
             path = os.path.join(self.key_dir, f"{identity}{ext}")
             if os.path.exists(path):
                 os.remove(path)
@@ -316,6 +316,21 @@ class KeyStore:
                 continue
 
         return keys
+
+    def load_signed_prekey_priv_pem(self, identity: str, passphrase: str) -> bytes:
+        """加载本地存储的签名预密钥私钥 (PEM)"""
+        spk_path = os.path.join(self.key_dir, f"{identity}.spk")
+        if not os.path.exists(spk_path):
+            return None
+        with open(spk_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        from core import urlsafe_b64decode
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        salt = urlsafe_b64decode(data["salt"].encode("ascii"))
+        nonce = urlsafe_b64decode(data["nonce"].encode("ascii"))
+        enc_priv = urlsafe_b64decode(data["enc_priv"].encode("ascii"))
+        wrapping_key = derive_key(passphrase, salt)
+        return AESGCM(wrapping_key).decrypt(nonce, enc_priv, None)
 
     def export_public_key_b64(self, identity: str) -> str:
         """导出 Base64 编码的 RSA 公钥 (旧版兼容)"""
@@ -456,6 +471,19 @@ class KeyStore:
         otp_path = os.path.join(self.key_dir, f"{identity}.otpkeys")
         with open(otp_path, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "keys": otp_entries}, f, ensure_ascii=False)
+
+        spk_path = os.path.join(self.key_dir, f"{identity}.spk")
+        spk_salt = secrets.token_bytes(SALT_SIZE)
+        spk_nonce = secrets.token_bytes(12)
+        spk_wrapping_key = derive_key(passphrase, spk_salt)
+        spk_enc = AESGCM(spk_wrapping_key).encrypt(spk_nonce, prekey_priv_pem, None)
+        spk_data = {
+            "salt": urlsafe_b64encode(spk_salt).decode("ascii"),
+            "nonce": urlsafe_b64encode(spk_nonce).decode("ascii"),
+            "enc_priv": urlsafe_b64encode(spk_enc).decode("ascii"),
+        }
+        with open(spk_path, "w", encoding="utf-8") as f:
+            json.dump(spk_data, f, ensure_ascii=False)
 
         fingerprint = hashlib.sha256(identity_key_pem).hexdigest()[:16]
 

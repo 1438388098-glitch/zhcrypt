@@ -1,10 +1,8 @@
 *.pyc
 __pycache__/
-*.zhprekey.db
-.DS_Store
-*.log
-.venv/
-venv/
-*.egg-info/
-dist/
-build/
+zhprekey.db
+*.otpkeys
+*.session
+zhcrypt-portable/
+zhcrypt-portable.zip
+lib/
