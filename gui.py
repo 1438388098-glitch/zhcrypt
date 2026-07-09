@@ -542,22 +542,41 @@ class ZhCryptGUI:
         self.tree.column("comment", width=150)
         self.tree.column("created", width=180)
 
-        bundle_frame = ttk.LabelFrame(main, text="公钥交换 (聊天用)", padding=8)
-        bundle_frame.pack(fill=tk.X, pady=(0, 8))
-        bnd_top = ttk.Frame(bundle_frame)
-        bnd_top.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(bnd_top, text="对方身份名:").pack(side=tk.LEFT, padx=(0, 4))
-        self.import_name_entry = ttk.Entry(bnd_top, width=16)
-        self.import_name_entry.pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Button(bnd_top, text="导出我的公钥束",
+        export_import_frame = ttk.LabelFrame(main, text="公钥交换 (聊天用)", padding=8)
+        export_import_frame.pack(fill=tk.X, pady=(0, 8))
+
+        export_row = ttk.Frame(export_import_frame)
+        export_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(export_row, text="① 导出我的公钥束发给对方", font=("", 9)).pack(anchor=tk.W)
+        btn_row1 = ttk.Frame(export_import_frame)
+        btn_row1.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(btn_row1, text="导出我的公钥束",
                    command=self._on_export_bundle).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(bnd_top, text="复制公钥束",
-                   command=self._on_copy_bundle).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(bnd_top, text="导入对方公钥束",
-                   command=self._on_import_bundle).pack(side=tk.LEFT)
-        self.bundle_text = tk.Text(bundle_frame, height=2, wrap=tk.WORD,
+        ttk.Button(btn_row1, text="复制",
+                   command=self._on_copy_bundle).pack(side=tk.LEFT)
+        ttk.Label(btn_row1, text="（先在上方身份列表中选中你的身份）", font=("", 7),
+                  foreground="#999").pack(side=tk.LEFT, padx=(8, 0))
+        self.bundle_text = tk.Text(export_import_frame, height=2, wrap=tk.WORD,
                                     font=("Consolas", 8), bg="#f5f5f5")
-        self.bundle_text.pack(fill=tk.X, pady=(4, 0))
+        self.bundle_text.pack(fill=tk.X, pady=(0, 8))
+
+        sep = ttk.Separator(export_import_frame, orient=tk.HORIZONTAL)
+        sep.pack(fill=tk.X, pady=(0, 8))
+
+        import_row = ttk.Frame(export_import_frame)
+        import_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(import_row, text="② 粘贴对方公钥束并导入", font=("", 9)).pack(anchor=tk.W)
+        imp_row2 = ttk.Frame(export_import_frame)
+        imp_row2.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(imp_row2, text="公钥束:").pack(side=tk.LEFT, padx=(0, 4))
+        self.import_paste_text = tk.Text(imp_row2, height=2, wrap=tk.WORD,
+                                          font=("Consolas", 8))
+        self.import_paste_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ttk.Label(imp_row2, text="名字:").pack(side=tk.LEFT, padx=(0, 4))
+        self.import_name_entry = ttk.Entry(imp_row2, width=14)
+        self.import_name_entry.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(imp_row2, text="导入",
+                   command=self._on_import_bundle).pack(side=tk.LEFT)
 
     def _refresh_identity_list(self):
         for item in self.tree.get_children():
@@ -966,13 +985,12 @@ class ZhCryptGUI:
 
     def _on_import_bundle(self):
         name = self.import_name_entry.get().strip()
+        bundle = self.import_paste_text.get("1.0", "end-1c").strip()
         if not name:
-            messagebox.showwarning("警告", "请先在上方输入身份名")
+            messagebox.showwarning("警告", "请填写对方身份名")
             return
-        try:
-            bundle = self.root.clipboard_get()
-        except Exception:
-            messagebox.showwarning("警告", "剪贴板为空")
+        if not bundle:
+            messagebox.showwarning("警告", "请把对方的公钥束粘贴到输入框")
             return
         try:
             self.store.import_public_key_bundle(bundle, name)
