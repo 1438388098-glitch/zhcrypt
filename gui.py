@@ -542,38 +542,18 @@ class ZhCryptGUI:
         self.tree.column("comment", width=150)
         self.tree.column("created", width=180)
 
-        export_frame = ttk.LabelFrame(main, text="导出公钥 (分享给他人)", padding=8)
-        export_frame.pack(fill=tk.X, pady=(0, 8))
-        exp_row = ttk.Frame(export_frame)
-        exp_row.pack(fill=tk.X)
-        ttk.Button(exp_row, text="导出选中身份公钥",
-                   command=self._on_export_key).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(exp_row, text="复制到剪贴板",
-                   command=self._on_copy_exported_key).pack(side=tk.LEFT)
-        self.exported_key_text = tk.Text(export_frame, height=3, wrap=tk.WORD,
-                                         font=("Consolas", 9), bg="#f5f5f5",
-                                         state=tk.DISABLED)
-        self.exported_key_text.pack(fill=tk.X, pady=(6, 0))
-
-        import_frame = ttk.LabelFrame(main, text="导入他人公钥", padding=8)
-        import_frame.pack(fill=tk.X)
-        imp_top = ttk.Frame(import_frame)
-        imp_top.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(imp_top, text="身份名:").pack(side=tk.LEFT, padx=(0, 4))
-        self.import_name_entry = ttk.Entry(imp_top, width=20)
-        self.import_name_entry.pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Button(imp_top, text="从剪贴板导入",
-                   command=self._on_import_from_clipboard).pack(side=tk.LEFT)
-
-        bundle_frame = ttk.LabelFrame(main, text="完整公钥束 (聊天用)", padding=8)
-        bundle_frame.pack(fill=tk.X, pady=(8, 0))
+        bundle_frame = ttk.LabelFrame(main, text="公钥交换 (聊天用)", padding=8)
+        bundle_frame.pack(fill=tk.X, pady=(0, 8))
         bnd_top = ttk.Frame(bundle_frame)
         bnd_top.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(bnd_top, text="导出完整公钥束",
+        ttk.Label(bnd_top, text="对方身份名:").pack(side=tk.LEFT, padx=(0, 4))
+        self.import_name_entry = ttk.Entry(bnd_top, width=16)
+        self.import_name_entry.pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Button(bnd_top, text="导出我的公钥束",
                    command=self._on_export_bundle).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(bnd_top, text="复制到剪贴板",
+        ttk.Button(bnd_top, text="复制公钥束",
                    command=self._on_copy_bundle).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(bnd_top, text="导入完整公钥束",
+        ttk.Button(bnd_top, text="导入对方公钥束",
                    command=self._on_import_bundle).pack(side=tk.LEFT)
         self.bundle_text = tk.Text(bundle_frame, height=2, wrap=tk.WORD,
                                     font=("Consolas", 8), bg="#f5f5f5")
@@ -675,45 +655,6 @@ class ZhCryptGUI:
             self._refresh_identity_list()
             self._refresh_hybrid_identities()
             self._set_status(f"已删除身份 '{identity}'", 4000)
-        except Exception as e:
-            messagebox.showerror("错误", str(e))
-
-    def _on_export_key(self):
-        identity = self._get_selected_identity()
-        if not identity:
-            return
-        try:
-            b64 = self.store.export_public_key_b64(identity)
-            self.exported_key_text.config(state=tk.NORMAL)
-            self.exported_key_text.delete("1.0", tk.END)
-            self.exported_key_text.insert("1.0", b64)
-            self.exported_key_text.config(state=tk.DISABLED)
-            self._set_status(f"已导出 '{identity}' 公钥", 4000)
-        except Exception as e:
-            messagebox.showerror("错误", str(e))
-
-    def _on_copy_exported_key(self):
-        text = self.exported_key_text.get("1.0", "end-1c").strip()
-        if text:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self._set_status("公钥已复制到剪贴板", 3000)
-
-    def _on_import_from_clipboard(self):
-        name = self.import_name_entry.get().strip()
-        if not name:
-            messagebox.showwarning("警告", "请输入身份名")
-            return
-        try:
-            b64 = self.root.clipboard_get()
-        except Exception:
-            messagebox.showwarning("警告", "剪贴板为空")
-            return
-        try:
-            self.store.import_public_key_b64(b64, name)
-            self._refresh_identity_list()
-            self._refresh_hybrid_identities()
-            self._set_status(f"已导入公钥 '{name}'", 4000)
         except Exception as e:
             messagebox.showerror("错误", str(e))
 
