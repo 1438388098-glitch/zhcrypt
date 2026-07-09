@@ -1097,20 +1097,16 @@ class ZhCryptGUI:
         self.chat_msg_display.tag_configure("p_name", foreground="#1c1c1e", font=("Microsoft YaHei", 8, "bold"),
                                              lmargin1=4, spacing1=6)
         self.chat_msg_display.tag_configure("p_bubble", foreground="#1c1c1e",
-                                             background="#ffffff", lmargin1=4, lmargin2=0,
-                                             rmargin=80, spacing1=2, spacing3=4,
-                                             wrap=tk.WORD)
+                                             background="#ffffff", lmargin1=8, spacing1=2, spacing3=4)
         self.chat_msg_display.tag_configure("p_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
-                                             lmargin1=8, spacing2=4)
-        # Bubble tags — me (right)
+                                             lmargin1=12)
+        # Bubble tags — me (right-style via big left margin)
         self.chat_msg_display.tag_configure("m_name", foreground="#1c1c1e", font=("Microsoft YaHei", 8, "bold"),
-                                             rmargin=4, spacing1=6)
+                                             lmargin1=80, spacing1=6)
         self.chat_msg_display.tag_configure("m_bubble", foreground="#1c1c1e",
-                                             background="#d1e7ff", lmargin1=80, lmargin2=0,
-                                             rmargin=4, spacing1=2, spacing3=4,
-                                             wrap=tk.WORD)
+                                             background="#d1e7ff", lmargin1=80, spacing1=2, spacing3=4)
         self.chat_msg_display.tag_configure("m_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
-                                             rmargin=8, spacing2=4)
+                                             lmargin1=80)
 
         # ---- Input Area ----
         input_frame = ttk.Frame(main)
