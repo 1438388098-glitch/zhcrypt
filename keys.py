@@ -202,7 +202,10 @@ class KeyStore:
         """加载指定身份的 X25519 KEM 公钥"""
         path = os.path.join(self.key_dir, f"{identity}.x25519.pub")
         if not os.path.exists(path):
-            raise FileNotFoundError(f"身份 '{identity}' 的 KEM 公钥不存在: {path}")
+            raise FileNotFoundError(
+                f"身份 '{identity}' 缺少 X25519 密钥 (用于聊天)。\n"
+                f"请创建新身份: zhcrypt init <新名字>\n"
+                f"或使用已有身份中的: default")
         with open(path, "rb") as f:
             return f.read()
 
@@ -212,6 +215,37 @@ class KeyStore:
         if not os.path.exists(path):
             raise FileNotFoundError(f"身份 '{identity}' 的 KEM 私钥不存在: {path}")
         return self._unwrap_key(path, passphrase)
+
+    def ensure_kem_keys(self, identity: str, passphrase: str) -> bool:
+        """如果身份缺少 X25519 密钥对, 自动生成 (用于兼容旧版身份)"""
+        pub_path = os.path.join(self.key_dir, f"{identity}.x25519.pub")
+        priv_path = os.path.join(self.key_dir, f"{identity}.x25519")
+        if os.path.exists(pub_path) and os.path.exists(priv_path):
+            return False
+        from core import generate_x25519_key_pair, serialize_x25519_private_key, serialize_x25519_public_key, derive_key, SALT_SIZE
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        import secrets
+        kem_priv, kem_pub = generate_x25519_key_pair()
+        with open(pub_path, "wb") as f:
+            f.write(serialize_x25519_public_key(kem_pub))
+        salt = secrets.token_bytes(SALT_SIZE)
+        wrapping_key = derive_key(passphrase, salt)
+        nonce = secrets.token_bytes(12)
+        aesgcm = AESGCM(wrapping_key)
+        encrypted = aesgcm.encrypt(nonce, serialize_x25519_private_key(kem_priv), None)
+        with open(priv_path, "wb") as f:
+            f.write(salt + nonce + encrypted)
+        meta_path = os.path.join(self.key_dir, f"{identity}.meta")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as mf:
+                    meta = json.load(mf)
+                meta["kem_upgraded"] = True
+                with open(meta_path, "w", encoding="utf-8") as mf:
+                    json.dump(meta, mf, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+        return True
 
     def load_private_key(self, identity: str, passphrase: str):
         """加载并解密 RSA 私钥 (兼容新旧两种存储格式)"""

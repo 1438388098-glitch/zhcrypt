@@ -177,6 +177,8 @@ class ChatClient:
     def _initiate_session(self, peer_identity):
         from core import urlsafe_b64decode as b64d
 
+        self.store.ensure_kem_keys(self.identity, self.passphrase)
+
         resp = self._http_request("GET", f"/v1/prekey/{peer_identity}")
         if resp.get("error"):
             return {"error": f"无法获取 {peer_identity} 的 prekey: {resp['error']}"}
@@ -324,6 +326,8 @@ class ChatClient:
 
     def _handle_x3dh_init(self, msg):
         from core import urlsafe_b64decode as b64d
+
+        self.store.ensure_kem_keys(self.identity, self.passphrase)
 
         payload = msg["payload"]
 

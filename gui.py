@@ -951,10 +951,28 @@ class ZhCryptGUI:
         if not identity:
             return
         try:
+            from keys import KeyStore
             bundle = self.store.export_public_key_bundle(identity)
             self.bundle_text.delete("1.0", tk.END)
             self.bundle_text.insert("1.0", bundle)
             self._set_status(f"已导出 {identity} 的完整公钥束", 4000)
+        except FileNotFoundError as e:
+            ret = messagebox.askyesno("缺少聊天密钥",
+                f"身份「{identity}」是旧版创建的，缺少聊天所需的 X25519 密钥。\n\n"
+                f"是否现在自动补全？（需要输入私钥密码）")
+            if ret:
+                pwd = simpledialog.askstring("私钥密码", f"为 {identity} 补全 X25519 密钥\n请输入私钥密码:",
+                                              show="*", parent=self.root)
+                if pwd:
+                    try:
+                        self.store.ensure_kem_keys(identity, pwd)
+                        bundle = self.store.export_public_key_bundle(identity)
+                        self.bundle_text.delete("1.0", tk.END)
+                        self.bundle_text.insert("1.0", bundle)
+                        self._set_status(f"已补全密钥并导出 {identity} 的公钥束", 4000)
+                        messagebox.showinfo("成功", f"X25519 密钥已为 {identity} 补全")
+                    except Exception as e2:
+                        messagebox.showerror("错误", str(e2))
         except Exception as e:
             messagebox.showerror("错误", str(e))
 
