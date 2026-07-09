@@ -8,8 +8,6 @@ zhcrypt GUI - 中文加密系统图形面板
 import os
 import sys
 import time
-import tempfile
-import threading
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -26,8 +24,7 @@ from core import (
     packet_to_b64, b64_to_packet,
     encrypt_file_password_mode, decrypt_file_password_mode,
     encrypt_file_stream, decrypt_file_stream,
-    DecryptionError, MAGIC,
-    serialize_public_key,
+    DecryptionError,
 )
 from keys import KeyStore
 
@@ -106,7 +103,6 @@ class ZhCryptGUI:
         self.style.theme_use("clam")
 
         self.store = KeyStore()
-        self._current_password = ""
         self._chat_client = None
         self._chat_peer = None
         self._chat_poll_id = None
@@ -178,8 +174,8 @@ class ZhCryptGUI:
         frame = ttk.Frame(parent)
         ttk.Label(frame, text=f"{text}:").pack(side=tk.LEFT, padx=(0, 4))
         show_var = tk.BooleanVar(value=False)
-        entry = ttk.Entry(frame, width=28, show="*")
-        entry.pack(side=tk.LEFT, padx=(0, 4))
+        entry = ttk.Entry(frame, show="*")
+        entry.pack(side=tk.LEFT, padx=(0, 4), fill=tk.X, expand=True)
         btn = ttk.Checkbutton(frame, text="显示", variable=show_var,
                               command=lambda: entry.config(
                                   show="" if show_var.get() else "*"))
@@ -197,8 +193,15 @@ class ZhCryptGUI:
                   font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 8))
 
         ttk.Label(main, text="输入明文:").pack(anchor=tk.W)
-        self.text_input = tk.Text(main, height=5, wrap=tk.WORD, font=("Consolas", 10))
-        self.text_input.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
+        text_input_frame = ttk.Frame(main)
+        text_input_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
+        self.text_input_sb = ttk.Scrollbar(text_input_frame, orient=tk.VERTICAL)
+        self.text_input = tk.Text(text_input_frame, height=8, wrap=tk.WORD,
+                                  font=("Consolas", 10),
+                                  yscrollcommand=self.text_input_sb.set)
+        self.text_input_sb.config(command=self.text_input.yview)
+        self.text_input_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         pwd_row = ttk.Frame(main)
         pwd_row.pack(fill=tk.X, pady=(0, 4))
@@ -230,8 +233,15 @@ class ZhCryptGUI:
                 "生成随机中文词口令(4词组合)，加密后口令只显示一次。\n适合临时分享：将口令+密文分别发给对方。")
 
         ttk.Label(main, text="输出结果:").pack(anchor=tk.W)
-        self.text_output = tk.Text(main, height=4, wrap=tk.WORD, font=("Consolas", 10), bg="#f5f5f5")
-        self.text_output.pack(fill=tk.BOTH, expand=True, pady=(2, 4))
+        text_output_frame = ttk.Frame(main)
+        text_output_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 4))
+        self.text_output_sb = ttk.Scrollbar(text_output_frame, orient=tk.VERTICAL)
+        self.text_output = tk.Text(text_output_frame, height=6, wrap=tk.WORD,
+                                   font=("Consolas", 10), bg="#f5f5f5",
+                                   yscrollcommand=self.text_output_sb.set)
+        self.text_output_sb.config(command=self.text_output.yview)
+        self.text_output_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text_output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.text_sig_status = ttk.Label(main, text="", font=("Microsoft YaHei", 9))
         self.text_sig_status.pack(anchor=tk.W)
@@ -309,7 +319,6 @@ class ZhCryptGUI:
             messagebox.showerror("错误", f"解密失败: {e}")
 
     def _decrypt_signed(self, packet, passphrase):
-        from config import get
         try:
             from core import decrypt_hybrid_signed
             store_key = KeyStore()
@@ -370,7 +379,6 @@ class ZhCryptGUI:
             self._set_status("临时口令已生成", 6000)
         except Exception as e:
             messagebox.showerror("错误", f"加密失败: {e}")
-        self._set_status("已清空", 2000)
 
     # ============================================================
     # Tab 2: 文件加解密
@@ -401,9 +409,15 @@ class ZhCryptGUI:
             side=tk.LEFT, padx=(0, 6))
 
         ttk.Label(main, text="操作日志:").pack(anchor=tk.W)
-        self.file_log = tk.Text(main, height=10, wrap=tk.WORD, font=("Consolas", 9),
-                                bg="#f5f5f5", state=tk.DISABLED)
-        self.file_log.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        file_log_frame = ttk.Frame(main)
+        file_log_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        self.file_log_sb = ttk.Scrollbar(file_log_frame, orient=tk.VERTICAL)
+        self.file_log = tk.Text(file_log_frame, height=10, wrap=tk.WORD, font=("Consolas", 9),
+                                bg="#f5f5f5", state=tk.DISABLED,
+                                yscrollcommand=self.file_log_sb.set)
+        self.file_log_sb.config(command=self.file_log.yview)
+        self.file_log_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.file_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def _file_log_append(self, text):
         self.file_log.config(state=tk.NORMAL)
@@ -510,8 +524,15 @@ class ZhCryptGUI:
             side=tk.RIGHT)
 
         columns = ("identity", "fingerprint", "comment", "created")
-        self.tree = ttk.Treeview(main, columns=columns, show="headings",
-                                 selectmode="browse", height=6)
+        tree_frame = ttk.Frame(main)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        self.tree_sb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings",
+                                 selectmode="browse", height=6,
+                                 yscrollcommand=self.tree_sb.set)
+        self.tree_sb.config(command=self.tree.yview)
+        self.tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree.heading("identity", text="身份")
         self.tree.heading("fingerprint", text="指纹")
         self.tree.heading("comment", text="备注")
@@ -520,7 +541,6 @@ class ZhCryptGUI:
         self.tree.column("fingerprint", width=140)
         self.tree.column("comment", width=150)
         self.tree.column("created", width=180)
-        self.tree.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         export_frame = ttk.LabelFrame(main, text="导出公钥 (分享给他人)", padding=8)
         export_frame.pack(fill=tk.X, pady=(0, 8))
@@ -571,8 +591,8 @@ class ZhCryptGUI:
                     id_["comment"],
                     id_["created"],
                 ))
-        except Exception:
-            pass
+        except Exception as e:
+            self._set_status(f"身份列表刷新失败: {e}", 3000)
 
     def _refresh_cfg_identities(self):
         try:
@@ -623,6 +643,10 @@ class ZhCryptGUI:
             comment = comment_entry.get().strip()
             if not name or not pwd:
                 messagebox.showwarning("警告", "名称和密码不能为空", parent=dialog)
+                return
+            import re as _re
+            if not _re.match(r"^[a-zA-Z0-9\u4e00-\u9fff_-]+$", name):
+                messagebox.showwarning("警告", "身份名只能包含字母、数字、中文、下划线或连字符", parent=dialog)
                 return
             if len(pwd.encode("utf-8")) < 8:
                 if not messagebox.askyesno("确认", "密码较短, 是否继续?", parent=dialog):
@@ -720,8 +744,15 @@ class ZhCryptGUI:
         self.hybrid_receiver_combo.pack(side=tk.LEFT)
 
         ttk.Label(main, text="输入明文:").pack(anchor=tk.W)
-        self.hybrid_input = tk.Text(main, height=4, wrap=tk.WORD, font=("Consolas", 10))
-        self.hybrid_input.pack(fill=tk.BOTH, expand=True, pady=(2, 6))
+        hybrid_input_frame = ttk.Frame(main)
+        hybrid_input_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 6))
+        self.hybrid_input_sb = ttk.Scrollbar(hybrid_input_frame, orient=tk.VERTICAL)
+        self.hybrid_input = tk.Text(hybrid_input_frame, height=6, wrap=tk.WORD,
+                                    font=("Consolas", 10),
+                                    yscrollcommand=self.hybrid_input_sb.set)
+        self.hybrid_input_sb.config(command=self.hybrid_input.yview)
+        self.hybrid_input_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.hybrid_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         pwd_frame, self.hybrid_pwd_entry, _ = self._make_password_frame(
             main, "你的私钥密码")
@@ -736,9 +767,15 @@ class ZhCryptGUI:
         ttk.Button(btn_row, text="复制密文", command=self._on_hybrid_copy).pack(side=tk.LEFT)
 
         ttk.Label(main, text="密文输出:").pack(anchor=tk.W)
-        self.hybrid_output = tk.Text(main, height=4, wrap=tk.WORD, font=("Consolas", 10),
-                                     bg="#f5f5f5")
-        self.hybrid_output.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        hybrid_output_frame = ttk.Frame(main)
+        hybrid_output_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        self.hybrid_output_sb = ttk.Scrollbar(hybrid_output_frame, orient=tk.VERTICAL)
+        self.hybrid_output = tk.Text(hybrid_output_frame, height=6, wrap=tk.WORD,
+                                     font=("Consolas", 10), bg="#f5f5f5",
+                                     yscrollcommand=self.hybrid_output_sb.set)
+        self.hybrid_output_sb.config(command=self.hybrid_output.yview)
+        self.hybrid_output_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.hybrid_output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     # ============================================================
     # Tab 5: 系统配置 (新增)
@@ -779,7 +816,6 @@ class ZhCryptGUI:
         s_mem.pack(side=tk.LEFT, padx=8)
         self.cfg_mem_label = ttk.Label(row2, text=str(init_mem), width=4)
         self.cfg_mem_label.pack(side=tk.LEFT)
-        ToolTip(s_mem, "Argon2id 内存用量(MB)。内存硬化抵抗 GPU 攻击。\n256MB 为推荐值。512MB 更安全但不明显增加解密时间。")
         ToolTip(s_mem, "Argon2id 内存用量(MB)。内存硬化抵抗 GPU 攻击。\n256MB 为推荐值。512MB 更安全但不明显增加解密时间。")
 
         row3 = ttk.Frame(frame_params)
@@ -846,6 +882,9 @@ class ZhCryptGUI:
         if not url:
             messagebox.showwarning("警告", "请输入 Prekey 服务器 URL")
             return
+        if not url.startswith("https://") and not url.startswith("http://"):
+            messagebox.showwarning("警告", "URL 格式不正确，应以 https:// 开头")
+            return
         try:
             ctx = _ssl.create_default_context()
             ctx.check_hostname = False
@@ -864,8 +903,12 @@ class ZhCryptGUI:
 
     def _on_save_prekey(self):
         from config import load, save
+        url = self.cfg_pk_url_var.get().rstrip("/")
+        if not url.startswith("https://") and not url.startswith("http://"):
+            messagebox.showwarning("警告", "URL 格式不正确，应以 https:// 开头")
+            return
         cfg = load()
-        cfg["prekey_server"]["url"] = self.cfg_pk_url_var.get().rstrip("/")
+        cfg["prekey_server"]["url"] = url
         save(cfg)
         self._set_status("Prekey 服务器配置已保存", 4000)
 
@@ -949,7 +992,6 @@ class ZhCryptGUI:
         if not identity:
             return
         try:
-            from keys import KeyStore
             bundle = self.store.export_public_key_bundle(identity)
             self.bundle_text.delete("1.0", tk.END)
             self.bundle_text.insert("1.0", bundle)
@@ -996,7 +1038,6 @@ class ZhCryptGUI:
             self._refresh_identity_list()
             self._refresh_hybrid_identities()
             self._refresh_cfg_identities()
-            self._refresh_chat_contacts()
             self._set_status(f"已导入 {name} 的完整公钥束", 4000)
         except Exception as e:
             messagebox.showerror("错误", str(e))
@@ -1125,17 +1166,13 @@ class ZhCryptGUI:
         try:
             self.chat_peer_combo["values"] = peers
         except Exception:
-            pass
+            self._set_status("联系人列表刷新失败", 3000)
 
         identities = []
         try:
             identities = [id_["identity"] for id_ in self.store.list_identities()]
-        except Exception:
-            pass
-        try:
-            self.chat_identity_combo["values"] = identities
-        except Exception:
-            pass
+        except Exception as e:
+            self._set_status(f"身份列表加载失败: {e}", 3000)
         if identities:
             self.chat_identity_combo["values"] = identities
             cur = self.chat_identity_var.get()
@@ -1228,6 +1265,9 @@ class ZhCryptGUI:
                                      show="*", parent=self.root)
         if not passphrase:
             return
+        if not passphrase.strip():
+            messagebox.showwarning("警告", "密码不能为空")
+            return
 
         if self._chat_client:
             try:
@@ -1294,6 +1334,8 @@ class ZhCryptGUI:
                         new_count += 1
                     elif result and "error" in result:
                         self._append_chat_msg("error", f"解密失败: {result['error']}")
+            elif item.get("action") == "error":
+                self._append_chat_msg("error", item["message"])
             elif item.get("action") == "status":
                 connected = item.get("connected", False)
                 if connected:
@@ -1307,8 +1349,8 @@ class ZhCryptGUI:
                 if "error" not in r:
                     self._display_chat_message(r)
                     new_count += 1
-        except Exception:
-            pass
+        except Exception as e:
+            self._set_status(f"消息轮询失败: {e}", 3000)
 
         if new_count:
             self.chat_new_msg_label.config(text=f"新消息: +{new_count}")
