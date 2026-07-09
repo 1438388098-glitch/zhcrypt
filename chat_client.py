@@ -143,7 +143,7 @@ class ChatClient:
                         INBOUND.put({"action": "server_message", "data": data})
                     except _socket.timeout:
                         pass
-                    except WebSocketConnectionClosedException:
+                    except _WSCE:
                         break
                     except Exception:
                         break
