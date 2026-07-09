@@ -256,7 +256,7 @@ class ZhCryptGUI:
         self.text_output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.text_sig_status = ttk.Label(main, text="", font=("Microsoft YaHei", 9))
-        self.text_sig_status.pack(anchor=tk.W)
+        self.text_sig_status.grid(row=r, column=0, sticky="w")
 
     def _on_text_password_change(self, event=None):
         pwd = self.text_pwd_entry.get()
