@@ -1279,6 +1279,12 @@ class ZhCryptGUI:
                     result = self._chat_client.receive_chat_message(data["msg"])
                     if result and "error" not in result:
                         self._display_chat_message(result)
+                elif data.get("type") == "pending":
+                    for m in data.get("messages", []):
+                        if isinstance(m, dict) and "from" in m:
+                            r = self._chat_client.receive_chat_message(m)
+                            if r and "error" not in r:
+                                self._display_chat_message(r)
             elif item.get("action") == "error":
                 self._append_chat_msg("error", item["message"])
 
@@ -1298,6 +1304,13 @@ class ZhCryptGUI:
                         new_count += 1
                     elif result and "error" in result:
                         self._append_chat_msg("error", f"解密失败: {result['error']}")
+                elif data.get("type") == "pending":
+                    for m in data.get("messages", []):
+                        if isinstance(m, dict) and "from" in m:
+                            r = self._chat_client.receive_chat_message(m)
+                            if r and "error" not in r:
+                                self._display_chat_message(r)
+                                new_count += 1
             elif item.get("action") == "error":
                 self._append_chat_msg("error", item["message"])
             elif item.get("action") == "status":

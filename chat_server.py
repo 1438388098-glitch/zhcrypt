@@ -82,23 +82,29 @@ def check_rate_limit(identity):
 
 
 def store_message(msg_data):
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("""
-        INSERT OR IGNORE INTO messages
-        (id, session_id, sender, recipient, type, payload_json, server_ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        msg_data["id"],
-        msg_data["session_id"],
-        msg_data["from"],
-        msg_data["to"],
-        msg_data.get("type", "message"),
-        json.dumps(msg_data.get("payload", {}), ensure_ascii=False),
-        _now(),
-    ))
-    db.commit()
-    db.close()
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("""
+            INSERT OR IGNORE INTO messages
+            (id, session_id, sender, recipient, type, payload_json, server_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            msg_data["id"],
+            msg_data["session_id"],
+            msg_data["from"],
+            msg_data["to"],
+            msg_data.get("type", "message"),
+            json.dumps(msg_data.get("payload", {}), ensure_ascii=False),
+            _now(),
+        ))
+        db.commit()
+        db.close()
+        return True
+    except Exception as e:
+        import sys
+        print(f"[chat_server] store_message failed: {e}", file=sys.stderr)
+        return False
 
 
 def mark_delivered(msg_ids):
@@ -140,6 +146,30 @@ def get_pending_messages(identity, limit=50):
         msg_ids.append(row["id"])
     if msg_ids:
         mark_delivered(msg_ids)
+    return msgs
+
+
+def fetch_pending_messages(identity, limit=50):
+    """仅拉取 pending 消息，不标记 delivered（供 WS 使用）"""
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    rows = db.execute("""
+        SELECT * FROM messages
+        WHERE recipient = ? AND delivered_at IS NULL
+        ORDER BY server_ts ASC LIMIT ?
+    """, (identity, limit)).fetchall()
+    db.close()
+    msgs = []
+    for row in rows:
+        msgs.append({
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "from": row["sender"],
+            "to": row["recipient"],
+            "type": row["type"],
+            "timestamp": row["server_ts"],
+            "payload": json.loads(row["payload_json"]),
+        })
     return msgs
 
 
@@ -237,7 +267,10 @@ async def handler(websocket, path):
                         {"type": "error", "code": 400, "message": "invalid message"}))
                     continue
 
-                store_message(msg)
+                if not store_message(msg):
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 500, "message": "message store failed"}))
+                    continue
                 await websocket.send(json.dumps(
                     {"type": "ack", "msg_id": msg["id"]}))
 
@@ -251,11 +284,17 @@ async def handler(websocket, path):
             elif msg_type == "get_pending":
                 if not identity:
                     continue
-                pending = get_pending_messages(identity, limit=50)
-                await websocket.send(json.dumps({
-                    "type": "pending",
-                    "messages": pending,
-                }, ensure_ascii=False))
+                pending = fetch_pending_messages(identity, limit=500)
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "pending",
+                        "messages": pending,
+                    }, ensure_ascii=False))
+                    msg_ids = [m["id"] for m in pending]
+                    if msg_ids:
+                        mark_delivered(msg_ids)
+                except Exception:
+                    pass
 
             else:
                 await websocket.send(json.dumps(
