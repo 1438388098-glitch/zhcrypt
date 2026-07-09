@@ -188,42 +188,51 @@ class ZhCryptGUI:
     def _build_text_tab(self):
         main = ttk.Frame(self.tab_text, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(3, weight=1)
 
         ttk.Label(main, text="加密文本 (支持中文/英文/数字/Emoji)",
-                  font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 8))
+                  font=("", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        ttk.Label(main, text="输入明文:").pack(anchor=tk.W)
+        r = 1
+        ttk.Label(main, text="输入明文:").grid(row=r, column=0, sticky="w"); r += 1
         text_input_frame = ttk.Frame(main)
-        text_input_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
+        text_input_frame.grid(row=r, column=0, sticky="nsew", pady=(2, 8))
+        text_input_frame.columnconfigure(0, weight=1)
+        text_input_frame.rowconfigure(0, weight=1)
+        r += 1
         self.text_input_sb = ttk.Scrollbar(text_input_frame, orient=tk.VERTICAL)
-        self.text_input = tk.Text(text_input_frame, height=8, wrap=tk.WORD,
+        self.text_input = tk.Text(text_input_frame, wrap=tk.WORD,
                                   font=("Consolas", 10),
                                   yscrollcommand=self.text_input_sb.set)
         self.text_input_sb.config(command=self.text_input.yview)
-        self.text_input_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.text_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text_input_sb.grid(row=0, column=1, sticky="ns")
+        self.text_input.grid(row=0, column=0, sticky="nsew")
 
         pwd_row = ttk.Frame(main)
-        pwd_row.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(pwd_row, text="加密密码:").pack(side=tk.LEFT, padx=(0, 4))
-        self.text_pwd_entry = ttk.Entry(pwd_row, width=20, show="*")
-        self.text_pwd_entry.pack(side=tk.LEFT, padx=(0, 4))
+        pwd_row.grid(row=r, column=0, sticky="ew", pady=(0, 4))
+        pwd_row.columnconfigure(1, weight=1)
+        r += 1
+        ttk.Label(pwd_row, text="加密密码:").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self.text_pwd_entry = ttk.Entry(pwd_row)
+        self.text_pwd_entry.grid(row=0, column=1, sticky="ew", padx=(0, 4))
         self.text_pwd_show_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(pwd_row, text="显示", variable=self.text_pwd_show_var,
                         command=lambda: self.text_pwd_entry.config(
                             show="" if self.text_pwd_show_var.get() else "*")
-                        ).pack(side=tk.LEFT, padx=(0, 8))
+                        ).grid(row=0, column=2, padx=(0, 8))
         self.text_strength_bar = StrengthBar(pwd_row)
-        self.text_strength_bar.pack(side=tk.LEFT, padx=(0, 4))
+        self.text_strength_bar.grid(row=0, column=3, padx=(0, 4))
         self.text_pwd_entry.bind("<KeyRelease>", self._on_text_password_change)
 
         self.text_strength_label = ttk.Label(pwd_row, text="未检测", font=("Microsoft YaHei", 8))
-        self.text_strength_label.pack(side=tk.LEFT)
+        self.text_strength_label.grid(row=0, column=4, sticky="w")
         ToolTip(self.text_strength_bar,
                 "密码强度实时评估。弱<30bits → 红  中30-50 → 橙\n强50-80 → 黄  极强>80 → 绿\n每次密钥派生使用 Argon2id(256MB)")
 
         btn_row = ttk.Frame(main)
-        btn_row.pack(fill=tk.X, pady=(0, 8))
+        btn_row.grid(row=r, column=0, sticky="w", pady=(0, 8))
+        r += 1
         ttk.Button(btn_row, text="加密", command=self._on_text_encrypt).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="解密", command=self._on_text_decrypt).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="复制密文", command=self._on_copy_output).pack(side=tk.LEFT, padx=(0, 6))
@@ -232,9 +241,12 @@ class ZhCryptGUI:
         ToolTip(btn_row.winfo_children()[-1],
                 "生成随机中文词口令(4词组合)，加密后口令只显示一次。\n适合临时分享：将口令+密文分别发给对方。")
 
-        ttk.Label(main, text="输出结果:").pack(anchor=tk.W)
+        ttk.Label(main, text="输出结果:").grid(row=r, column=0, sticky="w"); r += 1
         text_output_frame = ttk.Frame(main)
-        text_output_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 4))
+        text_output_frame.grid(row=r, column=0, sticky="nsew", pady=(2, 4))
+        text_output_frame.columnconfigure(0, weight=1)
+        text_output_frame.rowconfigure(0, weight=1)
+        r += 1
         self.text_output_sb = ttk.Scrollbar(text_output_frame, orient=tk.VERTICAL)
         self.text_output = tk.Text(text_output_frame, height=6, wrap=tk.WORD,
                                    font=("Consolas", 10), bg="#f5f5f5",
@@ -386,31 +398,36 @@ class ZhCryptGUI:
     def _build_file_tab(self):
         main = ttk.Frame(self.tab_file, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(4, weight=1)
 
         ttk.Label(main, text="文件加密 / 解密",
-                  font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 8))
+                  font=("", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        ttk.Label(main, text="选择文件:").pack(anchor=tk.W)
+        ttk.Label(main, text="选择文件:").grid(row=1, column=0, sticky="w")
         pick_row = ttk.Frame(main)
-        pick_row.pack(fill=tk.X, pady=(2, 4))
+        pick_row.grid(row=2, column=0, sticky="ew", pady=(2, 4))
+        pick_row.columnconfigure(0, weight=1)
         self.file_path_var = tk.StringVar()
-        ttk.Entry(pick_row, textvariable=self.file_path_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        ttk.Button(pick_row, text="浏览...", command=self._on_browse_file).pack(side=tk.LEFT)
+        ttk.Entry(pick_row, textvariable=self.file_path_var).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(pick_row, text="浏览...", command=self._on_browse_file).grid(row=0, column=1, sticky="w")
 
         pwd_frame, self.file_pwd_entry, _ = self._make_password_frame(main)
-        pwd_frame.pack(anchor=tk.W, pady=(4, 8))
+        pwd_frame.grid(row=3, column=0, sticky="ew", pady=(4, 8))
 
         btn_row = ttk.Frame(main)
-        btn_row.pack(fill=tk.X, pady=(0, 8))
+        btn_row.grid(row=4, column=0, sticky="w", pady=(0, 8))
         ttk.Button(btn_row, text="加密文件", command=self._on_file_encrypt).pack(
             side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="解密文件", command=self._on_file_decrypt).pack(
             side=tk.LEFT, padx=(0, 6))
 
-        ttk.Label(main, text="操作日志:").pack(anchor=tk.W)
+        ttk.Label(main, text="操作日志:").grid(row=5, column=0, sticky="w")
         file_log_frame = ttk.Frame(main)
-        file_log_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        file_log_frame.grid(row=6, column=0, sticky="nsew", pady=(2, 0))
+        file_log_frame.columnconfigure(0, weight=1)
+        file_log_frame.rowconfigure(0, weight=1)
         self.file_log_sb = ttk.Scrollbar(file_log_frame, orient=tk.VERTICAL)
         self.file_log = tk.Text(file_log_frame, height=10, wrap=tk.WORD, font=("Consolas", 9),
                                 bg="#f5f5f5", state=tk.DISABLED,
@@ -510,12 +527,14 @@ class ZhCryptGUI:
     def _build_keys_tab(self):
         main = ttk.Frame(self.tab_keys, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(3, weight=1)
 
         ttk.Label(main, text="密钥管理",
-                  font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 8))
+                  font=("", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         top_row = ttk.Frame(main)
-        top_row.pack(fill=tk.X, pady=(0, 6))
+        top_row.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(top_row, text="新建身份", command=self._on_init_identity).pack(
             side=tk.LEFT, padx=(0, 4))
         ttk.Button(top_row, text="删除选中身份", command=self._on_delete_identity).pack(
@@ -525,7 +544,9 @@ class ZhCryptGUI:
 
         columns = ("identity", "fingerprint", "comment", "created")
         tree_frame = ttk.Frame(main)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        tree_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
         self.tree_sb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings",
                                  selectmode="browse", height=6,
@@ -543,7 +564,7 @@ class ZhCryptGUI:
         self.tree.column("created", width=180)
 
         export_import_frame = ttk.LabelFrame(main, text="公钥交换 (聊天用)", padding=8)
-        export_import_frame.pack(fill=tk.X, pady=(0, 8))
+        export_import_frame.grid(row=3, column=0, sticky="ew")
 
         export_row = ttk.Frame(export_import_frame)
         export_row.pack(fill=tk.X, pady=(0, 4))
@@ -686,12 +707,13 @@ class ZhCryptGUI:
     def _build_hybrid_tab(self):
         main = ttk.Frame(self.tab_hybrid, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
+        main.columnconfigure(0, weight=1)
 
         ttk.Label(main, text="混合加密模式 (RSA-4096 + AES-256-GCM)",
-                  font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 8))
+                  font=("", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         sender_frame = ttk.Frame(main)
-        sender_frame.pack(fill=tk.X, pady=(0, 6))
+        sender_frame.grid(row=1, column=0, sticky="w", pady=(0, 6))
         ttk.Label(sender_frame, text="发送方 (你自己):").pack(side=tk.LEFT, padx=(0, 4))
         self.hybrid_sender_var = tk.StringVar()
         self.hybrid_sender_combo = ttk.Combobox(sender_frame,
@@ -706,32 +728,38 @@ class ZhCryptGUI:
                                                   width=18, state="readonly")
         self.hybrid_receiver_combo.pack(side=tk.LEFT)
 
-        ttk.Label(main, text="输入明文:").pack(anchor=tk.W)
+        r = 2
+        ttk.Label(main, text="输入明文:").grid(row=r, column=0, sticky="w"); r += 1
         hybrid_input_frame = ttk.Frame(main)
-        hybrid_input_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 6))
+        hybrid_input_frame.grid(row=r, column=0, sticky="nsew", pady=(2, 6))
+        hybrid_input_frame.columnconfigure(0, weight=1)
+        hybrid_input_frame.rowconfigure(0, weight=1)
+        r += 1
         self.hybrid_input_sb = ttk.Scrollbar(hybrid_input_frame, orient=tk.VERTICAL)
-        self.hybrid_input = tk.Text(hybrid_input_frame, height=6, wrap=tk.WORD,
+        self.hybrid_input = tk.Text(hybrid_input_frame, wrap=tk.WORD,
                                     font=("Consolas", 10),
                                     yscrollcommand=self.hybrid_input_sb.set)
         self.hybrid_input_sb.config(command=self.hybrid_input.yview)
-        self.hybrid_input_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.hybrid_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.hybrid_input_sb.grid(row=0, column=1, sticky="ns")
+        self.hybrid_input.grid(row=0, column=0, sticky="nsew")
 
         pwd_frame, self.hybrid_pwd_entry, _ = self._make_password_frame(
             main, "你的私钥密码")
-        pwd_frame.pack(anchor=tk.W, pady=(0, 8))
+        pwd_frame.grid(row=r, column=0, sticky="ew", pady=(0, 8)); r += 1
 
         btn_row = ttk.Frame(main)
-        btn_row.pack(fill=tk.X, pady=(0, 8))
+        btn_row.grid(row=r, column=0, sticky="w", pady=(0, 8)); r += 1
         ttk.Button(btn_row, text="加密并发送", command=self._on_hybrid_encrypt).pack(
             side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="解密接收的密文", command=self._on_hybrid_decrypt).pack(
             side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_row, text="复制密文", command=self._on_hybrid_copy).pack(side=tk.LEFT)
 
-        ttk.Label(main, text="密文输出:").pack(anchor=tk.W)
+        ttk.Label(main, text="密文输出:").grid(row=r, column=0, sticky="w"); r += 1
         hybrid_output_frame = ttk.Frame(main)
-        hybrid_output_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        hybrid_output_frame.grid(row=r, column=0, sticky="nsew", pady=(2, 0))
+        hybrid_output_frame.columnconfigure(0, weight=1)
+        hybrid_output_frame.rowconfigure(0, weight=1)
         self.hybrid_output_sb = ttk.Scrollbar(hybrid_output_frame, orient=tk.VERTICAL)
         self.hybrid_output = tk.Text(hybrid_output_frame, height=6, wrap=tk.WORD,
                                      font=("Consolas", 10), bg="#f5f5f5",
@@ -746,8 +774,16 @@ class ZhCryptGUI:
     def _build_config_tab(self):
         from config import load as _cl
         cfg = _cl()
-        main = ttk.Frame(self.tab_config, padding=12)
-        main.pack(fill=tk.BOTH, expand=True)
+        # Scrollable canvas
+        canvas = tk.Canvas(self.tab_config, bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.tab_config, orient=tk.VERTICAL, command=canvas.yview)
+        main = ttk.Frame(canvas, padding=12)
+        main.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=main, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        main.columnconfigure(0, weight=1)
 
         ttk.Label(main, text="Argon2id 加密参数",
                   font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 8))
