@@ -82,6 +82,7 @@ class ChatClient:
     def _http_request(self, method, path, body=None, timeout=15):
         import urllib.request
         import ssl
+        import json as _json
 
         base = self._server_url.rstrip("/")
         url = f"{base}{path}"
@@ -97,7 +98,14 @@ class ChatClient:
         ctx = ssl.create_default_context()
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                return _json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body_text = ""
+            try:
+                body_text = e.read().decode("utf-8")[:200]
+            except Exception:
+                pass
+            return {"error": f"HTTP {e.code}: {body_text or e.reason}"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -232,10 +240,11 @@ class ChatClient:
         save_session(state, self.passphrase)
 
         if self._ws_ready:
-            self._send_via_ws(msg)
+            err = self._send_via_ws(msg)
         else:
-            self._send_via_rest(msg)
-
+            err = self._send_via_rest(msg)
+        if err:
+            return {"error": f"发送失败: {err}"}
         return {"status": "sent", "msg_id": msg["id"], "type": "x3dh_init"}
 
     def _send_ratchet_message(self, state, plaintext):
@@ -261,20 +270,28 @@ class ChatClient:
         save_session(state, self.passphrase)
 
         if self._ws_ready:
-            self._send_via_ws(msg)
+            err = self._send_via_ws(msg)
         else:
-            self._send_via_rest(msg)
-
+            err = self._send_via_rest(msg)
+        if err:
+            return {"error": f"发送失败: {err}"}
         return {"status": "sent", "msg_id": msg["id"], "type": "message"}
 
     def _send_via_ws(self, msg):
         try:
             self.ws.send(json.dumps({"type": "send", "msg": msg}, ensure_ascii=False))
-        except Exception:
-            self._http_request("POST", "/v1/messages/send", msg)
+            return None
+        except Exception as e:
+            result = self._http_request("POST", "/v1/messages/send", msg)
+            if result.get("error"):
+                return result["error"]
+            return None
 
     def _send_via_rest(self, msg):
-        self._http_request("POST", "/v1/messages/send", msg)
+        result = self._http_request("POST", "/v1/messages/send", msg)
+        if result.get("error"):
+            return result["error"]
+        return None
 
     def receive_chat_message(self, msg):
         peer_identity = msg["from"]
@@ -397,10 +414,11 @@ class ChatClient:
         save_session(state, self.passphrase)
 
         if self._ws_ready:
-            self._send_via_ws(msg)
+            err = self._send_via_ws(msg)
         else:
-            self._send_via_rest(msg)
-
+            err = self._send_via_rest(msg)
+        if err:
+            return {"error": f"发送失败: {err}"}
         return {"status": "sent", "msg_id": msg["id"], "type": "x3dh_reply"}
 
     def _parse_decrypted(self, plain, msg):
