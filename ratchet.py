@@ -270,7 +270,8 @@ def receive_message(state, msg):
     their_ratchet_pub = _b64d(payload["ratchet_public_key"])
     msg_num = payload["message_number"]
 
-    if their_ratchet_pub != state.their_ratchet_pub:
+    # Skip DH ratchet for first reply (their_ratchet_pub still unset)
+    if their_ratchet_pub != state.their_ratchet_pub and state.their_ratchet_pub != b"\x00" * 32:
         _dh_ratchet_step(state, their_ratchet_pub)
 
     return _decrypt_message_in_chain(state, payload, msg)
@@ -390,6 +391,7 @@ def x3dh_initiate_session(
     )
     chain_material = hkdf_init.derive(our_ratchet_pub)
     send_chain_key = chain_material[:KEY_SIZE]
+    recv_chain_key = chain_material[KEY_SIZE:KEY_SIZE * 2]
 
     their_ratchet_pub = b"\x00" * 32
 
@@ -400,7 +402,7 @@ def x3dh_initiate_session(
         peer_signing_pub=peer_signing_pub_pem,
         root_key=root_key,
         send_chain_key=send_chain_key,
-        recv_chain_key=b"\x00" * KEY_SIZE,
+        recv_chain_key=recv_chain_key,
         our_ratchet_priv=our_ratchet_priv,
         our_ratchet_pub=our_ratchet_pub,
         their_ratchet_pub=their_ratchet_pub,

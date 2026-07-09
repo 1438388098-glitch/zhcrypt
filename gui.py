@@ -1352,14 +1352,15 @@ class ZhCryptGUI:
                 else:
                     self.chat_status_label.config(text="● 已断开", foreground="#e74c3c")
 
-        try:
-            poll_results = self._chat_client.poll_messages()
-            for r in poll_results:
-                if "error" not in r:
-                    self._display_chat_message(r)
-                    new_count += 1
-        except Exception as e:
-            self._set_status(f"消息轮询失败: {e}", 3000)
+        if not self._chat_client.connected:
+            try:
+                poll_results = self._chat_client.poll_messages()
+                for r in poll_results:
+                    if "error" not in r:
+                        self._display_chat_message(r)
+                        new_count += 1
+            except Exception as e:
+                self._set_status(f"消息轮询失败: {e}", 3000)
 
         if new_count:
             self.chat_new_msg_label.config(text=f"新消息: +{new_count}")

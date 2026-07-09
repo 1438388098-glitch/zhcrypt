@@ -127,11 +127,14 @@ class ChatClient:
                 reported_error = False
                 INBOUND.put({"action": "status", "connected": True})
 
+                # 1s socket timeout keeps connections alive while allowing
+                # the send queue to be processed frequently
+                try:
+                    self.ws.sock.settimeout(1.0)
+                except Exception:
+                    pass
+
                 while self._running:
-                    try:
-                        self.ws.sock.settimeout(1.0)
-                    except Exception:
-                        pass
                     try:
                         raw = self.ws.recv()
                         if raw is None:
@@ -144,6 +147,23 @@ class ChatClient:
                     except _socket.timeout:
                         pass
                     except _WSCE:
+                        break
+                    except (_socket.error, ConnectionError, IOError):
+                        break
+                    except Exception:
+                        break
+                    # Process queued outgoing messages after every recv
+                    try:
+                        while True:
+                            send_item = self._send_queue.get_nowait()
+                            self.ws.send(send_item)
+                    except queue.Empty:
+                        pass
+                    except _socket.timeout:
+                        continue
+                    except _WSCE:
+                        break
+                    except (_socket.error, ConnectionError, IOError):
                         break
                     except Exception:
                         break
