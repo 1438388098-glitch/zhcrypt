@@ -578,15 +578,13 @@ class ZhCryptGUI:
         try:
             ids = [id_["identity"] for id_ in self.store.list_identities()]
             self.cfg_pk_identity_combo["values"] = ids
-            if ids and not self.cfg_pk_identity_var.get():
-                self.cfg_pk_identity_var.set(ids[0])
+            cur = self.cfg_pk_identity_var.get()
+            if not cur or cur not in ids:
+                if ids:
+                    self.cfg_pk_identity_var.set(ids[0])
         except Exception:
             pass
-        try:
-            ids = [id_["identity"] for id_ in self.store.list_identities()]
-            self.chat_identity_combo["values"] = ids
-        except Exception:
-            pass
+        self._refresh_chat_contacts()
 
     def _get_selected_identity(self):
         sel = self.tree.selection()
@@ -1139,12 +1137,15 @@ class ZhCryptGUI:
         except Exception:
             pass
         if identities:
-            from config import get as _cfg_get
-            default_id = _cfg_get("default_identity", "default")
-            if default_id in identities:
-                self.chat_identity_var.set(default_id)
-            elif not self.chat_identity_var.get():
-                self.chat_identity_var.set(identities[0])
+            self.chat_identity_combo["values"] = identities
+            cur = self.chat_identity_var.get()
+            if not cur or cur not in identities:
+                from config import get as _cfg_get
+                default_id = _cfg_get("default_identity", "default")
+                if default_id in identities:
+                    self.chat_identity_var.set(default_id)
+                else:
+                    self.chat_identity_var.set(identities[0])
 
     def _on_chat_select_peer(self, event=None):
         peer = self.chat_peer_var.get()
