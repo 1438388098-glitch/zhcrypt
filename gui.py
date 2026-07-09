@@ -1098,19 +1098,19 @@ class ZhCryptGUI:
                                              lmargin1=4, spacing1=6)
         self.chat_msg_display.tag_configure("p_bubble", foreground="#1c1c1e",
                                              background="#ffffff", lmargin1=4, lmargin2=0,
-                                             rmargin1=80, spacing1=2, spacing3=4,
+                                             rmargin=80, spacing1=2, spacing3=4,
                                              wrap=tk.WORD)
         self.chat_msg_display.tag_configure("p_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
                                              lmargin1=8, spacing2=4)
         # Bubble tags — me (right)
         self.chat_msg_display.tag_configure("m_name", foreground="#1c1c1e", font=("Microsoft YaHei", 8, "bold"),
-                                             rmargin1=4, spacing1=6)
+                                             rmargin=4, spacing1=6)
         self.chat_msg_display.tag_configure("m_bubble", foreground="#1c1c1e",
                                              background="#d1e7ff", lmargin1=80, lmargin2=0,
-                                             rmargin1=4, spacing1=2, spacing3=4,
+                                             rmargin=4, spacing1=2, spacing3=4,
                                              wrap=tk.WORD)
         self.chat_msg_display.tag_configure("m_ts", foreground="#8e8e93", font=("Microsoft YaHei", 7),
-                                             rmargin1=8, spacing2=4)
+                                             rmargin=8, spacing2=4)
 
         # ---- Input Area ----
         input_frame = ttk.Frame(main)
@@ -1119,10 +1119,10 @@ class ZhCryptGUI:
         btn_row = ttk.Frame(input_frame)
         btn_row.pack(fill=tk.X, pady=(0, 4))
 
-        self.chat_emoji_btn = ttk.Button(btn_row, text="😊", width=3, command=self._on_emoji_picker)
+        self.chat_emoji_btn = ttk.Button(btn_row, text="Emoji", width=5, command=self._on_emoji_picker)
         self.chat_emoji_btn.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.chat_file_btn = ttk.Button(btn_row, text="📎", width=3, command=self._on_chat_send_file)
+        self.chat_file_btn = ttk.Button(btn_row, text="File", width=5, command=self._on_chat_send_file)
         self.chat_file_btn.pack(side=tk.LEFT, padx=(0, 4))
 
         self.chat_clear_btn = ttk.Button(btn_row, text="清空", width=4, command=self._on_clear_chat)
@@ -1443,11 +1443,10 @@ class ZhCryptGUI:
 
     def _on_emoji_picker(self):
         emojis = [
-            "😊", "😂", "😍", "🥰", "😘", "😅", "🤣", "👍",
-            "👎", "✌", "🤞", "👊", "❤️", "💔", "🔥", "⭐",
-            "🎉", "🎊", "💯", "✅", "❌", "✔", "⚠", "❗",
-            "👋", "🙏", "💪", "🤗", "😢", "😤", "🥺", "😎",
-            "🫡", "🤔", "🙄", "😴", "🥱", "😈", "👀", "💀",
+            ":)", ":D", ":(", ";)", ":P", "xD", "B)", ":o",
+            "<3", "</3", "^_^", "-_-", "._.", ">_<", "O_O", "T_T",
+            "+1", "-1", "OK", "NO", "Hi", "Bye", "WoW", "OMG",
+            "***", "!!!", "???", "~~~", "[*]", "[!]", "[?]", "[#]",
         ]
         picker = tk.Toplevel(self.root)
         picker.title("选择 Emoji")
@@ -1456,7 +1455,7 @@ class ZhCryptGUI:
         picker.grab_set()
         for i, em in enumerate(emojis):
             r, c = divmod(i, 8)
-            btn = tk.Button(picker, text=em, font=("Segoe UI Emoji", 14),
+            btn = tk.Button(picker, text=em, font=("Consolas", 11),
                            width=2, relief=tk.FLAT, bd=0,
                            command=lambda e=em: self._insert_emoji(e, picker))
             btn.grid(row=r, column=c, padx=1, pady=1)
