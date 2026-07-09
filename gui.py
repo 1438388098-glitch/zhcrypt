@@ -18,7 +18,7 @@ if os.path.isdir(LIBDIR):
     sys.path.insert(0, LIBDIR)
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 from core import (
     encrypt_password_mode, decrypt_password_mode,
@@ -544,6 +544,20 @@ class ZhCryptGUI:
         ttk.Button(imp_top, text="从剪贴板导入",
                    command=self._on_import_from_clipboard).pack(side=tk.LEFT)
 
+        bundle_frame = ttk.LabelFrame(main, text="完整公钥束 (聊天用)", padding=8)
+        bundle_frame.pack(fill=tk.X, pady=(8, 0))
+        bnd_top = ttk.Frame(bundle_frame)
+        bnd_top.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(bnd_top, text="导出完整公钥束",
+                   command=self._on_export_bundle).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(bnd_top, text="复制到剪贴板",
+                   command=self._on_copy_bundle).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(bnd_top, text="导入完整公钥束",
+                   command=self._on_import_bundle).pack(side=tk.LEFT)
+        self.bundle_text = tk.Text(bundle_frame, height=2, wrap=tk.WORD,
+                                    font=("Consolas", 8), bg="#f5f5f5")
+        self.bundle_text.pack(fill=tk.X, pady=(4, 0))
+
     def _refresh_identity_list(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -783,7 +797,8 @@ class ZhCryptGUI:
         row_pk_btn = ttk.Frame(frame_prekey)
         row_pk_btn.pack(fill=tk.X, pady=4)
         ttk.Button(row_pk_btn, text="测试连接", command=self._on_test_prekey).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(row_pk_btn, text="保存配置", command=self._on_save_prekey).pack(side=tk.LEFT)
+        ttk.Button(row_pk_btn, text="保存配置", command=self._on_save_prekey).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row_pk_btn, text="上传 Prekey", command=self._on_upload_prekey).pack(side=tk.LEFT)
         self.cfg_pk_status = ttk.Label(row_pk_btn, text="未连接", foreground="#888")
         self.cfg_pk_status.pack(side=tk.LEFT, padx=12)
 
@@ -906,6 +921,76 @@ class ZhCryptGUI:
             self.root.clipboard_append(text)
             self._set_status("已复制到剪贴板", 3000)
 
+    def _on_export_bundle(self):
+        identity = self._get_selected_identity()
+        if not identity:
+            return
+        try:
+            bundle = self.store.export_public_key_bundle(identity)
+            self.bundle_text.delete("1.0", tk.END)
+            self.bundle_text.insert("1.0", bundle)
+            self._set_status(f"已导出 {identity} 的完整公钥束", 4000)
+        except Exception as e:
+            messagebox.showerror("错误", str(e))
+
+    def _on_copy_bundle(self):
+        text = self.bundle_text.get("1.0", "end-1c").strip()
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._set_status("公钥束已复制", 3000)
+
+    def _on_import_bundle(self):
+        name = self.import_name_entry.get().strip()
+        if not name:
+            messagebox.showwarning("警告", "请先在上方输入身份名")
+            return
+        try:
+            bundle = self.root.clipboard_get()
+        except Exception:
+            messagebox.showwarning("警告", "剪贴板为空")
+            return
+        try:
+            self.store.import_public_key_bundle(bundle, name)
+            self._refresh_identity_list()
+            self._refresh_hybrid_identities()
+            self._refresh_chat_contacts()
+            self._set_status(f"已导入 {name} 的完整公钥束", 4000)
+        except Exception as e:
+            messagebox.showerror("错误", str(e))
+
+    def _on_upload_prekey(self):
+        identity = self.chat_identity_var.get()
+        if not identity:
+            messagebox.showwarning("警告", "请在聊天标签选择你的身份")
+            return
+        passphrase = simpledialog.askstring(
+            "私钥密码", f"上传 {identity} 的 Prekey\n请输入私钥密码:", show="*", parent=self.root)
+        if not passphrase:
+            return
+        try:
+            bundle = self.store.generate_prekey_bundle(identity, passphrase, otp_count=50)
+            import urllib.request, ssl, json
+            from config import get_prekey_server, get_auth_token
+            url = get_prekey_server()
+            token = get_auth_token()
+            if not url or not token:
+                messagebox.showerror("错误", "请先在系统配置页设置服务器地址")
+                return
+            data = json.dumps(dict(bundle, identity=identity), ensure_ascii=False).encode()
+            req = urllib.request.Request(url + "/v1/prekey/" + identity, data=data, method="POST")
+            req.add_header("Authorization", "Bearer " + token)
+            req.add_header("Content-Type", "application/json")
+            ctx = ssl.create_default_context()
+            resp = json.loads(urllib.request.urlopen(req, context=ctx, timeout=30).read())
+            if resp.get("status") == "ok":
+                self._set_status(f"Prekey 上传成功 (OTP: {resp.get('one_time_stored', 0)} 个)", 5000)
+                messagebox.showinfo("成功", f"Prekey 上传成功！\nOTP: {resp.get('one_time_stored', 0)} 个")
+            else:
+                messagebox.showerror("错误", f"上传失败: {resp}")
+        except Exception as e:
+            messagebox.showerror("错误", f"上传失败: {e}")
+
     def _build_chat_tab(self):
         main = ttk.Frame(self.tab_chat, padding=8)
         main.pack(fill=tk.BOTH, expand=True)
@@ -929,6 +1014,9 @@ class ZhCryptGUI:
 
         self.chat_connect_btn = ttk.Button(top_row, text="连接", command=self._on_chat_connect)
         self.chat_connect_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.chat_setup_btn = ttk.Button(top_row, text="? 聊天准备步骤", command=self._on_chat_setup_guide)
+        self.chat_setup_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.chat_status_label = ttk.Label(top_row, text="● 未连接", foreground="#999")
         self.chat_status_label.pack(side=tk.LEFT, padx=(0, 12))
@@ -1033,6 +1121,27 @@ class ZhCryptGUI:
         self._chat_peer = None
         self.chat_status_label.config(text="● 未连接", foreground="#999")
 
+    def _on_chat_setup_guide(self):
+        messagebox.showinfo("聊天准备步骤",
+            "开始聊天前需要完成以下准备：\n\n"
+            "▸ 步骤一：配置服务器\n"
+            "  切换到「系统配置」标签\n"
+            "  输入 URL: https://iweistoicqc5.top\n"
+            "  点「测试连接」确保服务器可达\n\n"
+            "▸ 步骤二：创建身份（如果还没有）\n"
+            "  文件菜单 → 初始化身份\n"
+            "  输入身份名和密码\n\n"
+            "▸ 步骤三：交换公钥束\n"
+            "  你：「密钥管理」→ 导出完整公钥束 → 发给朋友\n"
+            "  朋友也导出他的公钥束发给你\n"
+            "  你：粘贴朋友公钥束 → 输入身份名 → 导入完整公钥束\n\n"
+            "▸ 步骤四：上传 Prekey\n"
+            "  切换到「系统配置」标签\n"
+            "  点「上传 Prekey」→ 输入私钥密码\n"
+            "  朋友也要做这一步\n\n"
+            "▸ 步骤五：开始聊天\n"
+            "  回到本标签 → 选择身份和对方 → 点「连接」")
+
     def _on_chat_connect(self):
         peer = self.chat_peer_var.get()
         identity = self.chat_identity_var.get()
@@ -1043,13 +1152,37 @@ class ZhCryptGUI:
             messagebox.showwarning("警告", "请选择你的身份")
             return
 
+        if identity == peer:
+            messagebox.showwarning("警告", "不能和自己聊天，请选择不同的身份")
+            return
+
         from config import get_auth_token, get_prekey_server
         server_url = get_prekey_server()
         if not server_url:
             messagebox.showwarning("警告", "请先在系统配置页设置 Prekey 服务器")
             return
 
-        import tkinter.simpledialog as _sd
+        peer_exists = False
+        try:
+            self.store.load_signing_public_key(peer)
+            peer_exists = True
+        except Exception:
+            pass
+
+        if not peer_exists:
+            ret = messagebox.askyesno("缺少对方公钥",
+                f"还没有导入「{peer}」的公钥束。\n\n"
+                "需要先和对方交换公钥：\n"
+                f"1. 在「密钥管理」标签选中「{identity}」→ 导出完整公钥束\n"
+                "2. 把公钥束复制发给对方\n"
+                "3. 让对方把他的公钥束也发给你\n"
+                "4. 粘贴对方公钥束 → 点「导入完整公钥束」\n\n"
+                "现在去导入吗？")
+            if ret:
+                self.notebook.select(self.tab_keys)
+            return
+
+        import simpledialog as _sd
         passphrase = _sd.askstring("私钥密码", f"[{identity}] 请输入私钥密码:",
                                      show="*", parent=self.root)
         if not passphrase:
