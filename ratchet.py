@@ -360,6 +360,10 @@ def x3dh_initiate_session(
     peer_signing_pub_pem,
 ):
     peer_id_pub = deserialize_x25519_pub(peer_identity_key_pub_pem)
+    peer_spk_pub = deserialize_x25519_pub(peer_signed_prekey_pub_pem)
+    peer_otp_pub = None
+    if peer_one_time_prekey_pub_b64:
+        peer_otp_pub = deserialize_x25519_pub(_b64d(peer_one_time_prekey_pub_b64))
 
     eph_priv_raw, eph_pub_raw = generate_x25519_keypair_raw()
     my_id_pub = priv_from_raw(my_identity_priv_raw).public_key()
@@ -367,10 +371,15 @@ def x3dh_initiate_session(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw
     )
 
-    dh1 = x25519_ecdh_raw(eph_priv_raw, _pem_pub_to_raw(peer_id_pub))
-    dh2 = x25519_ecdh_raw(my_identity_priv_raw, _pem_pub_to_raw(peer_id_pub))
+    # 标准 X3DH: DH(IK_A, SPK_B) || DH(EK_A, IK_B) || DH(EK_A, SPK_B) || [DH(EK_A, OPK_B)]
+    dh1 = x25519_ecdh_raw(my_identity_priv_raw, _pem_pub_to_raw(peer_spk_pub))
+    dh2 = x25519_ecdh_raw(eph_priv_raw, _pem_pub_to_raw(peer_id_pub))
+    dh3 = x25519_ecdh_raw(eph_priv_raw, _pem_pub_to_raw(peer_spk_pub))
+    dh_bytes = dh1 + dh2 + dh3
 
-    dh_bytes = dh1 + dh2
+    if peer_otp_pub is not None:
+        dh4 = x25519_ecdh_raw(eph_priv_raw, _pem_pub_to_raw(peer_otp_pub))
+        dh_bytes += dh4
 
     root_key = HKDF(
         algorithm=hashes.SHA256(),
@@ -429,14 +438,15 @@ def x3dh_complete_session(
     one_time_prekey_priv_raw=None,
     session_id=None,
 ):
-    dh1 = x25519_ecdh_raw(my_signed_prekey_priv_raw, sender_ephemeral_pub_raw)
-    dh2 = x25519_ecdh_raw(my_identity_priv_raw, sender_identity_pub_raw)
+    dh1 = x25519_ecdh_raw(my_signed_prekey_priv_raw, sender_identity_pub_raw)
+    dh2 = x25519_ecdh_raw(my_identity_priv_raw, sender_ephemeral_pub_raw)
+    dh3 = x25519_ecdh_raw(my_signed_prekey_priv_raw, sender_ephemeral_pub_raw)
 
-    dh_bytes = dh1 + dh2
+    dh_bytes = dh1 + dh2 + dh3
 
     if one_time_prekey_priv_raw:
-        dh3 = x25519_ecdh_raw(one_time_prekey_priv_raw, sender_ephemeral_pub_raw)
-        dh_bytes += dh3
+        dh4 = x25519_ecdh_raw(one_time_prekey_priv_raw, sender_ephemeral_pub_raw)
+        dh_bytes += dh4
 
     root_key = HKDF(
         algorithm=hashes.SHA256(),

@@ -28,6 +28,85 @@ from core import (
     DecryptionError,
 )
 from argon2.low_level import hash_secret_raw, Type
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+import re
+import functools
+import inspect
+
+
+# 身份名校验：仅允许安全字符, 防止路径穿越 (审计 #2)
+_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+
+
+def _validate_identity(identity):
+    """校验身份名合法性, 拒绝路径穿越字符 (../、斜杠等)"""
+    if not isinstance(identity, str) or not identity:
+        raise ValueError("身份名不能为空")
+    if ".." in identity:
+        raise ValueError("非法身份名: %r (不允许 '..')" % identity)
+    if not _IDENTITY_RE.match(identity):
+        raise ValueError(
+            "非法身份名: %r (仅允许字母/数字/._@-, 长度 1-64)" % identity
+        )
+    return identity
+
+
+def _validate_identity_arg(func):
+    """装饰器: 自动校验方法参数中的 identity, 防止路径穿越写文件
+
+    注意: 实例方法调用时 self 已被消耗, 故 identity 在 *args 中的位置为 idx-1。
+    """
+    sig = inspect.signature(func)
+    params = list(sig.parameters)
+    idx = params.index("identity") if "identity" in params else None
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if idx is not None:
+            if len(args) > idx - 1:
+                _validate_identity(args[idx - 1])
+            elif "identity" in kwargs:
+                _validate_identity(kwargs["identity"])
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def compute_safety_number(my_signing_pub_pem: bytes,
+                          peer_signing_pub_pem: bytes) -> str:
+    """计算双方可带外比对的 safety number (60 hex, 5 位一组)。
+
+    由我方与对端 Ed25519 签名公钥拼接后取 SHA-256 得到。首次通信后,
+    双方应口头/带外比对这个号码是否一致, 以确认没有中间人。
+
+    注意: 必须对两份公钥做顺序归一化(按字节序排序后再拼接), 否则 A 看 B 与
+    B 看 A 的拼接顺序不同, 得到的号码不一致, 带外比对永远失败。
+    """
+    a = my_signing_pub_pem or b""
+    b = peer_signing_pub_pem or b""
+    combined = b"".join(sorted([a, b]))
+    digest = hashlib.sha256(combined).hexdigest()
+    return " ".join(digest[i:i + 5] for i in range(0, 60, 5))
+
+
+def _wrap_key_data(passphrase, key_bytes):
+    """用 Argon2id + AES-256-GCM 包裹密钥字节。
+
+    格式: [params(12)|salt(32)|nonce(12)|ciphertext]
+    与 _unwrap_key 解析格式保持一致 (修复审计 #15 格式不一致问题)。
+    """
+    salt = secrets.token_bytes(SALT_SIZE)
+    wrapping_key = derive_key(passphrase, salt)
+    nonce = secrets.token_bytes(12)
+    encrypted = AESGCM(wrapping_key).encrypt(nonce, key_bytes, None)
+    result = bytearray()
+    result.extend(struct.pack(">III", ARGON2_TIME_COST,
+                              ARGON2_MEMORY_COST, ARGON2_PARALLELISM))
+    result.extend(salt)
+    result.extend(nonce)
+    result.extend(encrypted)
+    return bytes(result)
 
 
 _DEFAULT_KEY_DIR = os.path.join(os.path.expanduser("~"), ".zhcrypt", "keys")
@@ -64,6 +143,7 @@ class KeyStore:
         self.key_dir = key_dir or _DEFAULT_KEY_DIR
         os.makedirs(self.key_dir, exist_ok=True)
 
+    @_validate_identity_arg
     def generate_identity(self, identity: str, passphrase: str,
                           comment: str = ""):
         """
@@ -105,30 +185,15 @@ class KeyStore:
         with open(kem_pub_path, "wb") as f:
             f.write(serialize_x25519_public_key(kem_pub))
 
-        def _wrap_key(key_bytes):
-            salt = secrets.token_bytes(SALT_SIZE)
-            wrapping_key = derive_key(passphrase, salt)
-            nonce = secrets.token_bytes(12)
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            aesgcm = AESGCM(wrapping_key)
-            encrypted = aesgcm.encrypt(nonce, key_bytes, None)
-            result = bytearray()
-            result.extend(struct.pack(">III", ARGON2_TIME_COST,
-                                      ARGON2_MEMORY_COST, ARGON2_PARALLELISM))
-            result.extend(salt)
-            result.extend(nonce)
-            result.extend(encrypted)
-            return bytes(result)
-
         rsa_key_pem = serialize_private_key_raw(private_key)
         with open(private_path, "wb") as f:
-            f.write(_wrap_key(rsa_key_pem))
+            f.write(_wrap_key_data(passphrase, rsa_key_pem))
 
         with open(sig_priv_path, "wb") as f:
-            f.write(_wrap_key(serialize_ed25519_private_key(sig_priv)))
+            f.write(_wrap_key_data(passphrase, serialize_ed25519_private_key(sig_priv)))
 
         with open(kem_priv_path, "wb") as f:
-            f.write(_wrap_key(serialize_x25519_private_key(kem_priv)))
+            f.write(_wrap_key_data(passphrase, serialize_x25519_private_key(kem_priv)))
 
         meta = {
             "identity": identity,
@@ -175,6 +240,7 @@ class KeyStore:
         except Exception:
             raise DecryptionError("私钥解密失败: 口令错误或密钥文件损坏")
 
+    @_validate_identity_arg
     def load_public_key(self, identity: str):
         """加载指定身份的 RSA 公钥"""
         path = os.path.join(self.key_dir, f"{identity}.pub")
@@ -183,6 +249,7 @@ class KeyStore:
         with open(path, "rb") as f:
             return f.read()
 
+    @_validate_identity_arg
     def load_signing_public_key(self, identity: str) -> bytes:
         """加载指定身份的 Ed25519 签名公钥"""
         path = os.path.join(self.key_dir, f"{identity}.ed25519.pub")
@@ -191,6 +258,7 @@ class KeyStore:
         with open(path, "rb") as f:
             return f.read()
 
+    @_validate_identity_arg
     def load_signing_private_key_pem(self, identity: str, passphrase: str) -> bytes:
         """加载解密后的 Ed25519 私钥 PEM"""
         path = os.path.join(self.key_dir, f"{identity}.ed25519")
@@ -198,6 +266,7 @@ class KeyStore:
             raise FileNotFoundError(f"身份 '{identity}' 的签名私钥不存在: {path}")
         return self._unwrap_key(path, passphrase)
 
+    @_validate_identity_arg
     def load_kem_public_key_pem(self, identity: str) -> bytes:
         """加载指定身份的 X25519 KEM 公钥"""
         path = os.path.join(self.key_dir, f"{identity}.x25519.pub")
@@ -209,6 +278,7 @@ class KeyStore:
         with open(path, "rb") as f:
             return f.read()
 
+    @_validate_identity_arg
     def load_kem_private_key_pem(self, identity: str, passphrase: str) -> bytes:
         """加载解密后的 X25519 私钥 PEM"""
         path = os.path.join(self.key_dir, f"{identity}.x25519")
@@ -216,6 +286,7 @@ class KeyStore:
             raise FileNotFoundError(f"身份 '{identity}' 的 KEM 私钥不存在: {path}")
         return self._unwrap_key(path, passphrase)
 
+    @_validate_identity_arg
     def ensure_kem_keys(self, identity: str, passphrase: str) -> bool:
         """如果身份缺少 X25519 密钥对, 自动生成 (用于兼容旧版身份)"""
         pub_path = os.path.join(self.key_dir, f"{identity}.x25519.pub")
@@ -228,13 +299,8 @@ class KeyStore:
         kem_priv, kem_pub = generate_x25519_key_pair()
         with open(pub_path, "wb") as f:
             f.write(serialize_x25519_public_key(kem_pub))
-        salt = secrets.token_bytes(SALT_SIZE)
-        wrapping_key = derive_key(passphrase, salt)
-        nonce = secrets.token_bytes(12)
-        aesgcm = AESGCM(wrapping_key)
-        encrypted = aesgcm.encrypt(nonce, serialize_x25519_private_key(kem_priv), None)
         with open(priv_path, "wb") as f:
-            f.write(salt + nonce + encrypted)
+            f.write(_wrap_key_data(passphrase, serialize_x25519_private_key(kem_priv)))
         meta_path = os.path.join(self.key_dir, f"{identity}.meta")
         if os.path.exists(meta_path):
             try:
@@ -247,6 +313,7 @@ class KeyStore:
                 pass
         return True
 
+    @_validate_identity_arg
     def load_private_key(self, identity: str, passphrase: str):
         """加载并解密 RSA 私钥 (兼容新旧两种存储格式)"""
         path = os.path.join(self.key_dir, f"{identity}.key")
@@ -262,6 +329,7 @@ class KeyStore:
                 private_pem, password=passphrase.encode("utf-8"), backend=_be()
             )
 
+    @_validate_identity_arg
     def load_private_key_pem(self, identity: str, passphrase: str) -> bytes:
         """加载解密后的 RSA 私钥 PEM 数据"""
         path = os.path.join(self.key_dir, f"{identity}.key")
@@ -294,6 +362,7 @@ class KeyStore:
                 })
         return identities
 
+    @_validate_identity_arg
     def delete_identity(self, identity: str):
         """删除指定身份的所有密钥文件"""
         removed = []
@@ -309,6 +378,7 @@ class KeyStore:
             raise FileNotFoundError(f"身份 '{identity}' 不存在")
         return removed
 
+    @_validate_identity_arg
     def verify_passphrase(self, identity: str, passphrase: str) -> bool:
         """验证身份口令是否正确"""
         try:
@@ -319,6 +389,7 @@ class KeyStore:
         except Exception:
             return False
 
+    @_validate_identity_arg
     def load_otp_private_keys(self, identity: str, passphrase: str) -> list:
         """
         加载本地存储的 OTP 私钥
@@ -351,6 +422,7 @@ class KeyStore:
 
         return keys
 
+    @_validate_identity_arg
     def load_signed_prekey_priv_pem(self, identity: str, passphrase: str) -> bytes:
         """加载本地存储的签名预密钥私钥 (PEM)"""
         spk_path = os.path.join(self.key_dir, f"{identity}.spk")
@@ -366,12 +438,34 @@ class KeyStore:
         wrapping_key = derive_key(passphrase, salt)
         return AESGCM(wrapping_key).decrypt(nonce, enc_priv, None)
 
+    @_validate_identity_arg
+    def store_tofu_signing_pub(self, peer_identity: str, pub_pem: bytes):
+        """TOFU: 记录首次接触到的对端 Ed25519 签名公钥 (防中间人换钥)
+
+        文件名使用独立后缀 .tofu.ed25519.pub, 避免与本地身份或带外导入的
+        公钥文件 (<peer>.ed25519.pub) 冲突。
+        """
+        path = os.path.join(self.key_dir, f"{peer_identity}.tofu.ed25519.pub")
+        with open(path, "wb") as f:
+            f.write(pub_pem)
+
+    @_validate_identity_arg
+    def load_tofu_signing_pub(self, peer_identity: str) -> bytes:
+        """TOFU: 读取已记录的对端签名公钥; 未记录则抛 FileNotFoundError"""
+        path = os.path.join(self.key_dir, f"{peer_identity}.tofu.ed25519.pub")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"未记录 {peer_identity} 的 TOFU 签名公钥")
+        with open(path, "rb") as f:
+            return f.read()
+
+    @_validate_identity_arg
     def export_public_key_b64(self, identity: str) -> str:
         """导出 Base64 编码的 RSA 公钥 (旧版兼容)"""
         from core import urlsafe_b64encode
         pub = self.load_public_key(identity)
         return urlsafe_b64encode(pub).decode("ascii")
 
+    @_validate_identity_arg
     def export_public_key_bundle(self, identity: str) -> str:
         """
         导出完整公钥束 (RSA + Ed25519 + X25519)
@@ -395,6 +489,7 @@ class KeyStore:
             json.dumps(bundle, ensure_ascii=False).encode("utf-8")
         ).decode("ascii")
 
+    @_validate_identity_arg
     def import_public_key_bundle(self, encoded: str, identity: str):
         """导入他人公钥束 (自动检测新旧格式)"""
         from core import urlsafe_b64decode
@@ -434,6 +529,7 @@ class KeyStore:
         with open(os.path.join(base, f"{identity}.meta"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
+    @_validate_identity_arg
     def import_public_key_b64(self, b64_pub: str, identity: str):
         """从 Base64 导入旧版 RSA 公钥"""
         from core import urlsafe_b64decode
@@ -453,6 +549,7 @@ class KeyStore:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         return public_path
 
+    @_validate_identity_arg
     def generate_prekey_bundle(self, identity: str, passphrase: str,
                                otp_count: int = 50) -> dict:
         """
@@ -462,8 +559,8 @@ class KeyStore:
         {
             "identity_key_pub": "base64-X25519公钥",
             "signed_prekey_pub": "base64-X25519签名预密钥",
-            "signed_prekey_priv": "base64-加密私钥",
-            "signature": "base64-Ed25519签名",
+            "signature": "base64-Ed25519签名 (对 signed_prekey_pub 的签名)",
+            "signing_public_key": "base64-Ed25519签名公钥 (供首次通信自验, 公钥无密) ",
             "one_time_prekeys": ["base64-X25519公钥", ...],
             "fingerprint": "hex-指纹"
         }
@@ -524,8 +621,10 @@ class KeyStore:
         return {
             "identity_key_pub": urlsafe_b64encode(identity_key_pem).decode("ascii"),
             "signed_prekey_pub": urlsafe_b64encode(prekey_pub_pem).decode("ascii"),
-            "signed_prekey_priv": urlsafe_b64encode(prekey_priv_pem).decode("ascii"),
             "signature": urlsafe_b64encode(sig).decode("ascii"),
+            "signing_public_key": urlsafe_b64encode(
+                self.load_signing_public_key(identity)
+            ).decode("ascii"),
             "one_time_prekeys": otp_public_keys,
             "fingerprint": fingerprint,
         }

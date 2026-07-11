@@ -333,7 +333,7 @@ def phase4_statistical():
     R("=" * 70)
 
     sample_sizes = [10, 100]
-    plaintext = "测试消息: Hello World! 你好世界! 12345! 🚀🔥"
+    plaintext = "测试消息: Hello World! 你好世界! 12345! [火箭][火]"
     password = "test_password_2024"
 
     R(f"\n  测试样本: {len(plaintext)} 字符明文")

@@ -9,7 +9,11 @@ import sys, os, time, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import set_prekey_server
-set_prekey_server('https://iweistoicqc5.top', '[REDACTED_TOKEN]')
+# H6: 从环境变量读取服务器配置，避免硬编码
+SERVER_URL = os.environ.get("ZHCHAT_TEST_SERVER", "https://iweistoicqc5.top")
+AUTH_TOKEN = os.environ.get("ZHCHAT_TEST_TOKEN", "[REDACTED_TOKEN]")
+
+set_prekey_server(SERVER_URL, AUTH_TOKEN)
 
 print("刷新双方 prekey...")
 from keys import KeyStore
@@ -18,8 +22,8 @@ def upload(identity, pw):
     import urllib.request, ssl
     bundle = ks.generate_prekey_bundle(identity, pw, otp_count=5)
     data = json.dumps(dict(bundle, identity=identity), ensure_ascii=False).encode()
-    req = urllib.request.Request('https://iweistoicqc5.top/v1/prekey/' + identity, data=data, method='POST')
-    req.add_header('Authorization', 'Bearer [REDACTED_TOKEN]')
+    req = urllib.request.Request(SERVER_URL + '/v1/prekey/' + identity, data=data, method='POST')
+    req.add_header('Authorization', 'Bearer ' + AUTH_TOKEN)
     req.add_header('Content-Type', 'application/json')
     urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30)
 

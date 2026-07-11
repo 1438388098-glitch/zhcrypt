@@ -6,3 +6,23 @@ zhprekey.db
 zhcrypt-portable/
 zhcrypt-portable.zip
 lib/
+
+# 构建 / 打包产物 (含内置 token 的 exe, 禁止入库)
+dist/
+build/
+dist_installer/
+*.pyz
+*.spec.bak
+manual.zip
+
+# 运行时密文与数据落盘
+files/
+*.enc
+
+# 测试缓存
+.pytest_cache/
+
+# 本地打包用 token (含凭证, 严禁入库)
+.build_token
+zhcrypt_local_defaults.json
+zhcrypt_local_defaults.jsonc

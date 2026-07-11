@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zhcrypt 系统架构</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background: #0a0e17;
+  color: #e8edf5;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  overflow-x: hidden;
+  min-height: 100vh;
+}
+
+/* Animated background grid */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image:
+    linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Floating gradient orbs */
+.orb {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  z-index: 0;
+  animation: float 20s ease-in-out infinite;
+}
+.orb-1 {
+  width: 600px; height: 600px;
+  background: radial-gradient(circle, rgba(56,189,248,0.12), transparent 70%);
+  top: -200px; right: -200px;
+  animation-delay: 0s;
+}
+.orb-2 {
+  width: 500px; height: 500px;
+  background: radial-gradient(circle, rgba(52,211,153,0.10), transparent 70%);
+  bottom: -200px; left: -200px;
+  animation-delay: -7s;
+}
+.orb-3 {
+  width: 400px; height: 400px;
+  background: radial-gradient(circle, rgba(251,191,36,0.08), transparent 70%);
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  animation-delay: -14s;
+}
+
+@keyframes float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -30px) scale(1.05); }
+  66% { transform: translate(-20px, 20px) scale(0.95); }
+}
+
+.container {
+  position: relative;
+  z-index: 1;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+}
+
+/* Header */
+.header {
+  text-align: center;
+  padding: 60px 0 20px;
+  position: relative;
+}
+.header::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 50%;
+  transform: translateX(-50%);
+  width: 120px; height: 2px;
+  background: linear-gradient(90deg, transparent, #38bdf8, transparent);
+}
+.header h1 {
+  font-size: 42px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #f0f9ff 0%, #38bdf8 50%, #818cf8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -1px;
+}
+.header .subtitle {
+  font-size: 15px;
+  font-weight: 400;
+  color: #64748b;
+  margin-top: 8px;
+  letter-spacing: 0.3px;
+}
+
+/* Section labels */
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 48px 0 20px;
+  position: relative;
+}
+.section-label .line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(56,189,248,0.3), transparent);
+}
+.section-label .icon {
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+.section-label h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #e2e8f0;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.section-label .tag {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 10px;
+  border-radius: 20px;
+  background: rgba(56,189,248,0.1);
+  color: #38bdf8;
+  border: 1px solid rgba(56,189,248,0.2);
+}
+
+/* Cards grid */
+.grid {
+  display: grid;
+  gap: 12px;
+}
+
+.grid-2 { grid-template-columns: 1fr 1fr; }
+.grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+.grid-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+.grid-6 { grid-template-columns: 1fr 1fr 1fr 1fr 1fr 1fr; }
+
+/* Glass card */
+.card {
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(56, 189, 248, 0.08);
+  border-radius: 16px;
+  padding: 16px 18px;
+  transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+.card:hover {
+  border-color: rgba(56, 189, 248, 0.2);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(56, 189, 248, 0.06);
+}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0.6;
+}
+
+.card .title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.card .title .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+.card ul {
+  list-style: none;
+}
+.card ul li {
+  font-size: 11.5px;
+  color: #94a3b8;
+  padding: 2px 0;
+  padding-left: 12px;
+  position: relative;
+  line-height: 1.5;
+}
+.card ul li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* Flow arrow */
+.flow-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.flow-arrow {
+  flex-shrink: 0;
+  color: #475569;
+  font-size: 18px;
+  font-weight: 300;
+}
+
+/* Network node */
+.network-node {
+  text-align: center;
+  padding: 24px;
+  position: relative;
+}
+.network-node .icon-big {
+  font-size: 36px;
+  margin-bottom: 8px;
+  display: block;
+}
+.network-node .label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+.network-node .sub {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+/* Arrow between sections */
+.connector {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+  color: #334155;
+  font-size: 24px;
+  font-weight: 200;
+}
+
+/* Security cards */
+.security-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 16px;
+}
+.security-card {
+  border-radius: 16px;
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid;
+  background: rgba(15, 23, 42, 0.4);
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease;
+}
+.security-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+}
+.security-card .icon-em {
+  font-size: 28px;
+  display: block;
+  margin-bottom: 8px;
+}
+.security-card h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.security-card p {
+  font-size: 11.5px;
+  line-height: 1.6;
+  opacity: 0.75;
+}
+
+.security-card.color-1 { border-color: rgba(52,211,153,0.25); }
+.security-card.color-1 h3 { color: #34d399; }
+.security-card.color-2 { border-color: rgba(56,189,248,0.25); }
+.security-card.color-2 h3 { color: #38bdf8; }
+.security-card.color-3 { border-color: rgba(196,181,253,0.25); }
+.security-card.color-3 h3 { color: #c4b5fd; }
+.security-card.color-4 { border-color: rgba(251,146,60,0.25); }
+.security-card.color-4 h3 { color: #fb923c; }
+
+/* Flow lines (vertical connector area) */
+.flow-vertical {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 6px 0;
+  gap: 16px;
+}
+.flow-vertical .line-v {
+  width: 1px;
+  height: 24px;
+  background: linear-gradient(to bottom, rgba(56,189,248,0.3), transparent);
+}
+.flow-vertical .label-v {
+  font-size: 10px;
+  font-weight: 500;
+  color: #475569;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* Deployment cards */
+.deploy-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 16px;
+}
+.deploy-card {
+  background: rgba(15, 23, 42, 0.4);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(56,189,248,0.08);
+  border-radius: 14px;
+  padding: 18px;
+  transition: all 0.3s ease;
+}
+.deploy-card:hover {
+  border-color: rgba(56,189,248,0.2);
+  transform: translateY(-2px);
+}
+.deploy-card h4 {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #38bdf8;
+  margin-bottom: 8px;
+}
+.deploy-card p {
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.7;
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .grid-4, .grid-6 { grid-template-columns: 1fr 1fr 1fr; }
+  .security-grid, .deploy-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 768px) {
+  .grid-2, .grid-3, .grid-4, .grid-6 { grid-template-columns: 1fr; }
+  .security-grid, .deploy-grid { grid-template-columns: 1fr; }
+  .header h1 { font-size: 28px; }
+}
+
+/* Subtle scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0a0e17; }
+::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+/* Glow text for accent */
+.glow { text-shadow: 0 0 20px rgba(56,189,248,0.3); }
+</style>
+</head>
+<body>
+
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+<div class="orb orb-3"></div>
+
+<div class="container">
+
+  <!-- ===== HEADER ===== -->
+  <header class="header">
+    <h1>zhcrypt</h1>
+    <p class="subtitle">端到端加密系统 · Argon2id + AES-256-GCM + RSA-4096 + Ed25519 + X25519 X3DH + Double Ratchet</p>
+  </header>
+
+  <!-- ===== CLIENT ===== -->
+  <div class="section-label">
+    <span class="icon" style="background:rgba(56,189,248,0.15);">🖥</span>
+    <h2 style="color:#38bdf8;">客户端</h2>
+    <span class="line"></span>
+    <span class="tag">Client</span>
+  </div>
+
+  <div class="grid grid-4">
+    <div class="card" style="--accent:#38bdf8;">
+      <div class="title"><span class="dot"></span>用户界面</div>
+      <ul>
+        <li>GUI 图形面板 — Tkinter，6 个功能标签页</li>
+        <li>CLI 命令行 — argparse，25+ 子命令</li>
+        <li>start.bat — 桌面一键启动</li>
+        <li>密码强度条 + ToolTip 悬停提示</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#f97316;">
+      <div class="title"><span class="dot"></span>聊天协议</div>
+      <ul>
+        <li>x3dh_init — 首次消息 2DH 密钥交换</li>
+        <li>x3dh_reply — 应答初始化 + 链密钥建立</li>
+        <li>message — 普通棘轮加密消息</li>
+        <li>签名验证 + 前向安全标识</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#f59e0b;">
+      <div class="title"><span class="dot"></span>Double Ratchet</div>
+      <ul>
+        <li>KDF_CK — 对称棘轮：链密钥→消息密钥</li>
+        <li>KDF_RK — DH 棘轮：根密钥更新</li>
+        <li>Skipped Keys — 乱序消息缓存回补</li>
+        <li>seen_message_ids — 重放保护去重</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#22c55e;">
+      <div class="title"><span class="dot"></span>密码学核心</div>
+      <ul>
+        <li>Argon2id — RFC 9106，256MB 内存硬化</li>
+        <li>AES-256-GCM — AEAD 认证加密防篡改</li>
+        <li>RSA-4096-OAEP — 非对称混合加密</li>
+        <li>Ed25519 — 数字签名身份认证</li>
+        <li>X25519 — X3DH 前向安全密钥交换</li>
+        <li>HKDF-SHA256 — 安全密钥派生函数</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="grid grid-3" style="margin-top:12px;">
+    <div class="card" style="--accent:#a78bfa;">
+      <div class="title"><span class="dot"></span>密钥管理</div>
+      <ul>
+        <li>KeyStore — RSA+Ed25519+X25519 三套密钥体系</li>
+        <li>Export/Import — Base64 JSON 公钥束交换</li>
+        <li>Shamir — 3-of-5 秘密分享私钥备份恢复</li>
+        <li>Prekey 自动上传 + 定时轮换</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#ef4444;">
+      <div class="title"><span class="dot"></span>聊天客户端</div>
+      <ul>
+        <li>ChatClient — asyncio WebSocket 连接管理</li>
+        <li>消息队列 — queue.Queue 线程安全</li>
+        <li>指数退避重连 — 最大 60 秒间隔</li>
+        <li>REST API 降级 — WebSocket 不可用回退</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#a78bfa;">
+      <div class="title"><span class="dot"></span>会话管理</div>
+      <ul>
+        <li>加密持久化 — Argon2id + AES-GCM 保护</li>
+        <li>自动恢复 — 重启自动加载会话状态</li>
+        <li>30 天过期 — 自动清理过期会话</li>
+        <li>文件路径 — ~/.zhcrypt/sessions/</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ===== CONNECTOR: Client → Network → Server ===== -->
+  <div class="connector">↓</div>
+
+  <!-- ===== NETWORK ===== -->
+  <div class="network-node">
+    <div style="display:inline-block; background:rgba(15,23,42,0.6); backdrop-filter:blur(20px); border:1px solid rgba(56,189,248,0.1); border-radius:50px; padding:16px 48px;">
+      <span class="icon-big">🌐</span>
+      <span class="label">互联网</span>
+      <span class="sub">TLS 1.2 · HTTPS 443 / WSS 443</span>
+    </div>
+  </div>
+
+  <div class="connector">↓</div>
+
+  <!-- ===== SERVER ===== -->
+  <div class="section-label">
+    <span class="icon" style="background:rgba(99,102,241,0.15);">☁</span>
+    <h2 style="color:#818cf8;">服务器</h2>
+    <span class="line"></span>
+    <span class="tag" style="border-color:rgba(99,102,241,0.2);color:#818cf8;background:rgba(99,102,241,0.1);">Alibaba Cloud ECS [REDACTED_IP]</span>
+  </div>
+
+  <div class="grid grid-2">
+    <div class="card" style="--accent:#6366f1;">
+      <div class="title"><span class="dot"></span>Nginx 反向代理</div>
+      <ul>
+        <li>HTTPS 443 — Let's Encrypt SSL 证书</li>
+        <li>location /v1/ → Flask :5002 (REST API)</li>
+        <li>location /v1/chat → WebSocket :5003</li>
+        <li>HTTPS 强制跳转 + HTTP/2</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#6366f1;">
+      <div class="title"><span class="dot"></span>系统服务</div>
+      <ul>
+        <li>zhprekey.service — gunicorn 2 workers Flask :5002</li>
+        <li>zhchat-ws.service — python3 asyncio WebSocket :5003</li>
+        <li>nginx.service — Baota 面板管理</li>
+        <li>系统重启自动拉起</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="flow-vertical">
+    <div class="line-v"></div>
+    <span class="label-v">Flask REST (port 5002)</span>
+    <div class="line-v"></div>
+  </div>
+
+  <div class="grid grid-4">
+    <div class="card" style="--accent:#60a5fa;">
+      <div class="title"><span class="dot"></span>Prekey 接口</div>
+      <ul>
+        <li>POST /v1/prekey/&lt;id&gt; — 上传 Bundle</li>
+        <li>GET  /v1/prekey/&lt;id&gt; — 获取 (消耗 OTP)</li>
+        <li>DELETE /v1/prekey/&lt;id&gt; — 清理</li>
+        <li>GET  /v1/prekey/remaining — 剩余数量</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#60a5fa;">
+      <div class="title"><span class="dot"></span>消息接口</div>
+      <ul>
+        <li>POST /v1/messages/send — 发送消息</li>
+        <li>GET  /v1/messages/pending — 待收列表</li>
+        <li>POST /v1/messages/ack — 确认投递</li>
+        <li>GET  /v1/messages/history — 历史记录</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#60a5fa;">
+      <div class="title"><span class="dot"></span>管理与工具</div>
+      <ul>
+        <li>DELETE /v1/messages/prune — 清理旧消息</li>
+        <li>GET  /v1/identities — 身份列表</li>
+        <li>GET  /v1/stats — 服务器统计</li>
+        <li>GET  /v1/health — 健康检查</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#60a5fa;">
+      <div class="title"><span class="dot"></span>认证系统</div>
+      <ul>
+        <li>Bearer Token — ZHPREKEY_TOKEN</li>
+        <li>hmac.compare_digest 常数时间比较</li>
+        <li>速率限制 — 30 请求/分钟/身份</li>
+        <li>SQLite WAL — 事务安全</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="flow-vertical">
+    <div class="line-v"></div>
+    <span class="label-v">WebSocket (port 5003)</span>
+    <div class="line-v"></div>
+  </div>
+
+  <div class="grid grid-4">
+    <div class="card" style="--accent:#fb7185;">
+      <div class="title"><span class="dot"></span>连接管理</div>
+      <ul>
+        <li>auth — Bearer Token 身份认证</li>
+        <li>身份绑定 — identity → WebSocket 映射</li>
+        <li>ping/pong — 30 秒保活检测</li>
+        <li>断开自动清除连接记录</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#fb7185;">
+      <div class="title"><span class="dot"></span>消息路由</div>
+      <ul>
+        <li>send — 接收消息 → SQLite 存储</li>
+        <li>实时推送 → 目标在线 WebSocket</li>
+        <li>离线存储 → 连接后 get_pending 补拉</li>
+        <li>ack 确认投递</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#fb7185;">
+      <div class="title"><span class="dot"></span>速率与安全</div>
+      <ul>
+        <li>每身份每分钟最多 30 条</li>
+        <li>消息大小上限 512 KB</li>
+        <li>JSON 格式校验</li>
+        <li>未知消息类型拒绝</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#fb7185;">
+      <div class="title"><span class="dot"></span>自动清理</div>
+      <ul>
+        <li>每小时自动清理</li>
+        <li>30 天前的旧消息</li>
+        <li>可手动 DELETE /prune</li>
+        <li>不清理已确认消息</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="flow-vertical">
+    <div class="line-v"></div>
+    <span class="label-v">数据库</span>
+    <div class="line-v"></div>
+  </div>
+
+  <div class="grid grid-2">
+    <div class="card" style="--accent:#fbbf24;">
+      <div class="title"><span class="dot" style="background:#fbbf24;"></span>SQLite — zhprekey.db</div>
+      <ul>
+        <li>WAL 模式 — 并发读 + 串行写</li>
+        <li>prekeys 表 — 签名预密钥 + 一次性预密钥</li>
+        <li>identities 表 — 用户身份注册信息</li>
+        <li>messages 表 — 加密消息 Blob 存储</li>
+        <li>索引优化 — recipient + delivered_at 复合索引</li>
+      </ul>
+    </div>
+    <div class="card" style="--accent:#a78bfa;">
+      <div class="title"><span class="dot"></span>数据流</div>
+      <ul>
+        <li>Alice → WebSocket send → 服务器存储密文</li>
+        <li>服务器通过 WebSocket 推送给 Bob</li>
+        <li>Bob 不在线？消息存储，上线后 pending 拉取</li>
+        <li>密文永远不会被解密—服务器零知识</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ===== SECURITY ===== -->
+  <div class="section-label" style="margin-top:60px;">
+    <span class="icon" style="background:rgba(52,211,153,0.15);">🔒</span>
+    <h2 style="color:#34d399;">安全属性</h2>
+    <span class="line"></span>
+    <span class="tag" style="border-color:rgba(52,211,153,0.2);color:#34d399;background:rgba(52,211,153,0.1);">Security</span>
+  </div>
+
+  <div class="security-grid">
+    <div class="security-card color-1">
+      <span class="icon-em">🔐</span>
+      <h3>端到端加密</h3>
+      <p>服务器只能转发密文，无法解密任何消息内容。所有加解密操作均在客户端完成。</p>
+    </div>
+    <div class="security-card color-2">
+      <span class="icon-em">🔄</span>
+      <h3>前向安全</h3>
+      <p>每条消息使用独立密钥。Double Ratchet 确保即使当前密钥泄露，历史消息也无法解密。</p>
+    </div>
+    <div class="security-card color-3">
+      <span class="icon-em">✍</span>
+      <h3>身份认证</h3>
+      <p>每条消息附带 Ed25519 数字签名，接收方验证来源真实性，防止中间人冒充。</p>
+    </div>
+    <div class="security-card color-4">
+      <span class="icon-em">🛡</span>
+      <h3>完整性保护</h3>
+      <p>AES-256-GCM AEAD 认证加密，任何密文篡改都会导致解密失败，保证消息不被改写。</p>
+    </div>
+  </div>
+
+  <!-- ===== DEPLOYMENT ===== -->
+  <div class="section-label" style="margin-top:40px;">
+    <span class="icon" style="background:rgba(251,191,36,0.15);">📦</span>
+    <h2 style="color:#fbbf24;">部署文档</h2>
+    <span class="line"></span>
+    <span class="tag" style="border-color:rgba(251,191,36,0.2);color:#fbbf24;background:rgba(251,191,36,0.1);">Deploy</span>
+  </div>
+
+  <div class="deploy-grid">
+    <div class="deploy-card">
+      <h4>🖥 本地开发</h4>
+      <p>python gui.py — GUI 启动<br>python cli.py — 命令行<br>python test_all.py — 56 项测试</p>
+    </div>
+    <div class="deploy-card">
+      <h4>☁ 服务器部署</h4>
+      <p>git push 到 ECS<br>systemctl restart zhprekey<br>systemctl restart zhchat-ws</p>
+    </div>
+    <div class="deploy-card">
+      <h4>📦 朋友使用</h4>
+      <p>解压 zhcrypt-portable.zip<br>双击 start.bat<br>无需安装 Python / pip</p>
+    </div>
+    <div class="deploy-card">
+      <h4>🔗 源码仓库</h4>
+      <p>git clone root@[REDACTED_IP]:<br>/opt/zhcrypt.git<br>密码: [REDACTED_PASSWORD]*</p>
+    </div>
+  </div>
+
+  <!-- ===== FOOTER ===== -->
+  <footer style="text-align:center; padding:48px 0 16px; color:#334155; font-size:12px; border-top:1px solid rgba(56,189,248,0.06); margin-top:40px;">
+    zhcrypt v3.0 — Built with Python 3.6 · Cryptography · Tkinter · Flask · WebSocket · Double Ratchet
+  </footer>
+
+</div>
+
+</body>
+</html>

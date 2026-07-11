@@ -7,6 +7,7 @@ zhchat WebSocket Server v1.0
 部署: python chat_server.py  (通过 systemd zhchat-ws)
 """
 import os
+import re
 import sys
 import json
 import time
@@ -27,9 +28,12 @@ DB_PATH = os.environ.get("ZHPREKEY_DB",
 AUTH_TOKEN = os.environ.get("ZHPREKEY_TOKEN", "")
 if not AUTH_TOKEN:
     AUTH_TOKEN = os.environ.get("ZHCHAT_TOKEN", "")
-    if not AUTH_TOKEN:
-        print("WARNING: ZHPREKEY_TOKEN 未设置, 使用不安全默认值")
-        AUTH_TOKEN = "dev-token-change-me"
+if not AUTH_TOKEN:
+    raise RuntimeError(
+        "ZHPREKEY_TOKEN 或 ZHCHAT_TOKEN 环境变量未设置。\n"
+        "请设置: export ZHPREKEY_TOKEN=$(python -c \"import secrets; print(secrets.token_hex(16))\")\n"
+        "并将 token 配置到客户端。"
+    )
 
 PORT = int(os.environ.get("ZHCHAT_WS_PORT", "5003"))
 HOST = os.environ.get("ZHCHAT_WS_HOST", "0.0.0.0")
@@ -40,6 +44,26 @@ os.makedirs(FILE_DIR, exist_ok=True)
 
 connected_clients = {}
 rate_limit_buckets = {}
+
+
+PREKEY_RATE_LIMIT_PER_MINUTE = int(os.environ.get("ZHCHAT_PREKEY_RATE_LIMIT", "10"))
+prekey_rate_limit_buckets = {}
+
+
+PREKEY_RATE_LIMIT_PER_MINUTE = int(os.environ.get("ZHCHAT_PREKEY_RATE_LIMIT", "10"))
+prekey_rate_limit_buckets = {}
+
+
+def _check_prekey_rate_limit(identity):
+    """V7: prekey 获取速率限制（每分钟 10 次）"""
+    now = _now()
+    bucket = prekey_rate_limit_buckets.get(identity, [])
+    bucket = [t for t in bucket if now - t < 60]
+    prekey_rate_limit_buckets[identity] = bucket
+    if len(bucket) >= PREKEY_RATE_LIMIT_PER_MINUTE:
+        return False
+    bucket.append(now)
+    return True
 
 
 def init_message_db():
@@ -66,12 +90,67 @@ def init_message_db():
         CREATE INDEX IF NOT EXISTS idx_messages_session
         ON messages(session_id, server_ts)
     """)
+    # V5: 文件元数据表，记录上传者与关联消息
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            token TEXT PRIMARY KEY,
+            uploader TEXT NOT NULL,
+            intended_recipient TEXT,
+            server_ts REAL NOT NULL
+        )
+    """)
+    # 兼容旧库: 补齐 intended_recipient 列 (审计 #7)
+    try:
+        cols = [r[1] for r in db.execute("PRAGMA table_info(files)")]
+        if "intended_recipient" not in cols:
+            db.execute("ALTER TABLE files ADD COLUMN intended_recipient TEXT")
+    except Exception:
+        pass
     db.commit()
     db.close()
 
 
 def _now():
     return time.time()
+
+
+def record_file_upload(db, token, uploader, recipient):
+    """记录文件上传元数据 (含预期接收方); recipient 为空表示仅上传者可下载"""
+    db.execute(
+        "INSERT INTO files (token, uploader, intended_recipient, server_ts) "
+        "VALUES (?, ?, ?, ?)",
+        (token, uploader, recipient or "", _now()),
+    )
+    db.commit()
+
+
+def can_download_file(db, token, identity):
+    """文件下载授权: 上传者本人或预期接收方均可下载 (审计 #7)"""
+    row = db.execute(
+        "SELECT uploader, intended_recipient FROM files WHERE token = ?",
+        (token,),
+    ).fetchone()
+    if row is None:
+        return False
+    uploader = row["uploader"]
+    recipient = row["intended_recipient"] or ""
+    return identity == uploader or identity == recipient
+
+
+def _resolve_file_path(token):
+    """将下载 token 解析为文件绝对路径, 防御路径穿越 (CWE-22)。
+
+    仅允许 32 位十六进制 token (与上传时 secrets.token_hex(16) 生成格式一致),
+    且解析后的真实路径必须严格位于 FILE_DIR 内。任何含 ../ 或非法字符的
+    token 都会返回 None, 从而杜绝读取 FILE_DIR 之外的任意文件。
+    """
+    if not isinstance(token, str) or not re.match(r"^[0-9a-fA-F]{32}$", token):
+        return None
+    file_path = os.path.join(FILE_DIR, token)
+    # 二次防御: 真实路径的父目录必须等于 FILE_DIR (即便正则被绕过)
+    if os.path.dirname(os.path.realpath(file_path)) != os.path.realpath(FILE_DIR):
+        return None
+    return file_path
 
 
 def check_rate_limit(identity):
@@ -225,7 +304,7 @@ async def push_to_identity(identity, msg):
     return False
 
 
-async def handler(websocket, path):
+async def handler(websocket, path=None):
     identity = None
     try:
         async for raw in websocket:
@@ -266,6 +345,8 @@ async def handler(websocket, path):
                     continue
 
                 msg = data.get("msg", {})
+                # 安全修复 #1: 强制发送者身份为已认证身份, 防止伪造他人身份
+                msg["from"] = identity
                 if not msg.get("id") or not msg.get("to"):
                     await websocket.send(json.dumps(
                         {"type": "error", "code": 400, "message": "invalid message"}))
@@ -316,6 +397,10 @@ async def handler(websocket, path):
                 file_path = os.path.join(FILE_DIR, token)
                 with open(file_path, "wb") as f:
                     f.write(base64.b64decode(file_data_b64))
+                # V5/#7: 记录上传者身份与预期接收方 (接收方由客户端在发送文件时提供)
+                db = sqlite3.connect(DB_PATH)
+                record_file_upload(db, token, identity, data.get("recipient", ""))
+                db.close()
                 await websocket.send(json.dumps({
                     "type": "file_upload_ack",
                     "token": token,
@@ -325,10 +410,19 @@ async def handler(websocket, path):
                 if not identity:
                     continue
                 token = data.get("token", "")
-                file_path = os.path.join(FILE_DIR, token)
-                if not os.path.exists(file_path):
+                file_path = _resolve_file_path(token)
+                if file_path is None or not os.path.exists(file_path):
                     await websocket.send(json.dumps(
                         {"type": "error", "code": 404, "message": "file not found"}))
+                    continue
+                # V5/#7: 授权 = 上传者本人 或 预期接收方
+                db = sqlite3.connect(DB_PATH)
+                db.row_factory = sqlite3.Row
+                allowed = can_download_file(db, token, identity)
+                db.close()
+                if not allowed:
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 403, "message": "not authorized to download this file"}))
                     continue
                 with open(file_path, "rb") as f:
                     file_data_b64 = base64.b64encode(f.read()).decode("ascii")
@@ -336,7 +430,12 @@ async def handler(websocket, path):
                     "type": "file_download_resp",
                     "file_data": file_data_b64,
                     "token": token,
-                }))
+                }))                # 阅后即焚: 接收方已取到密文, 立即删除服务器文件, 不留存
+                try:
+                    os.remove(file_path)
+                    print("[file] deleted after download: " + token)
+                except OSError:
+                    pass
 
             else:
                 await websocket.send(json.dumps(
@@ -376,14 +475,14 @@ async def main():
     init_message_db()
     print(f"zhchat WebSocket Server starting...")
     print(f"  DB: {DB_PATH}")
-    print(f"  Auth Token: {AUTH_TOKEN[:8]}...")
+    print("  Auth Token: *** (已隐藏)")
     print(f"  Retention: {MESSAGE_RETENTION_DAYS} days")
     print(f"  Rate limit: {RATE_LIMIT_PER_MINUTE}/min")
     print(f"  Listening on {HOST}:{PORT}")
 
     async with websockets.serve(handler, HOST, PORT,
-                                 ping_interval=30, ping_timeout=10,
-                                 max_size=512 * 1024):
+                                 ping_interval=30, ping_timeout=60,
+                                 max_size=100 * 1024 * 1024):
         await cleanup_loop()
 
 

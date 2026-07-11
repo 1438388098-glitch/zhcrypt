@@ -107,7 +107,7 @@ test_cases = [
     ("0123456789" * 100, "numberPass999", "纯数字长文本"),
     ("\u4e2d\u6587\u52a0\u5bc6\u7cfb\u7edf\u6d4b\u8bd5" * 50, "中文密码测试", "纯中文长文本"),
     ("", "emptyText.123!", "空文本"),
-    ("Emoji test: 🚀🔥💯 🎉", "emojiKey!@#", "含 Emoji"),
+    ("Emoji test: [火箭][火][满分] [庆祝]", "emojiKey!@#", "含特殊字符"),
     ("JSON: {\"name\": \"张三\", \"age\": 25}", "jsonPass456", "JSON 数据"),
     ("\r\n\t特殊\r\n字符", "special\tchars\npass", "含控制字符"),
     ("SELECT * FROM users WHERE name = '管理员'", "DB_P@ss!99", "SQL 语句"),

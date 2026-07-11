@@ -8,6 +8,8 @@ zhcrypt GUI - 中文加密系统图形面板
 import os
 import sys
 import time
+import json
+import base64
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -744,7 +746,7 @@ class ZhCryptGUI:
     # Tab 5: 系统配置 (新增)
     # ============================================================
     def _build_config_tab(self):
-        from config import load as _cl
+        from config import load as _cl, get_auth_token as _gat
         cfg = _cl()
         main = ttk.Frame(self.tab_config, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
@@ -806,6 +808,14 @@ class ZhCryptGUI:
         entry_url.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
         ToolTip(entry_url, "Prekey 服务器 URL。用于前向安全(PFS)通信\n的临时公钥存储与分发。部署在阿里云 ECS。")
 
+        row_token = ttk.Frame(frame_prekey)
+        row_token.pack(fill=tk.X, pady=4)
+        ttk.Label(row_token, text="Auth Token:").pack(side=tk.LEFT)
+        self.cfg_pk_token_var = tk.StringVar(value=_gat())
+        entry_token = ttk.Entry(row_token, textvariable=self.cfg_pk_token_var, width=40, show="*")
+        entry_token.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
+        ToolTip(entry_token, "服务器认证令牌 (Auth Token)。与 URL 一起保存,\n本机用设备密钥加密存储;换机器/新环境需重新填写。")
+
         row_ident = ttk.Frame(frame_prekey)
         row_ident.pack(fill=tk.X, pady=4)
         ttk.Label(row_ident, text="身份:").pack(side=tk.LEFT, padx=(0, 4))
@@ -865,14 +875,16 @@ class ZhCryptGUI:
             messagebox.showerror("连接失败", str(e))
 
     def _on_save_prekey(self):
-        from config import load, save
+        from config import load, save, set_prekey_server
         url = self.cfg_pk_url_var.get().rstrip("/")
         if not url.startswith("https://") and not url.startswith("http://"):
             messagebox.showwarning("警告", "URL 格式不正确，应以 https:// 开头")
             return
-        cfg = load()
-        cfg["prekey_server"]["url"] = url
-        save(cfg)
+        token = self.cfg_pk_token_var.get().strip()
+        if token:
+            set_prekey_server(url, token)
+        else:
+            set_prekey_server(url)
         self._set_status("Prekey 服务器配置已保存", 4000)
 
     def _refresh_hybrid_identities(self):
@@ -1044,6 +1056,11 @@ class ZhCryptGUI:
         main.columnconfigure(0, weight=1)
         main.rowconfigure(1, weight=1)
 
+        # 文件传输中间状态
+        self._pending_file_upload = None      # 大文件上传后待发的 [FILE] meta 信息
+        self._pending_file_downloads = {}     # token -> (fname, key_b64) 等待 file_download_resp
+        self._chat_file_msgs = {}             # 渲染 key -> (fname, fsize, key_b64, payload)
+
         # ---- Header (grid) ----
         header = ttk.Frame(main)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -1073,6 +1090,10 @@ class ZhCryptGUI:
 
         self.chat_status_label = ttk.Label(header, text="● 未连接", foreground="#999")
         self.chat_status_label.grid(row=0, column=c, sticky="w", padx=(0, 4)); c += 1
+
+        self.chat_safety_btn = ttk.Button(header, text="[锁]安全号",
+                                           command=self._on_show_safety_number)
+        self.chat_safety_btn.grid(row=0, column=c, sticky="w", padx=(0, 4)); c += 1
 
         self.chat_setup_btn = ttk.Button(header, text="?", command=self._on_chat_setup_guide, width=2)
         self.chat_setup_btn.grid(row=0, column=c, sticky="w"); c += 1
@@ -1138,6 +1159,9 @@ class ZhCryptGUI:
         self.chat_enc_status = ttk.Label(bottom_row, text="E2E 加密中",
                                           font=("Microsoft YaHei", 7), foreground="#8e8e93")
         self.chat_enc_status.pack(side=tk.LEFT)
+        self.chat_new_msg_label = ttk.Label(bottom_row, text="",
+                                             font=("Microsoft YaHei", 8), foreground="#27ae60")
+        self.chat_new_msg_label.pack(side=tk.LEFT, padx=(8, 0))
         self.chat_clear_btn = ttk.Button(bottom_row, text="清空", width=4, command=self._on_clear_chat)
         self.chat_clear_btn.pack(side=tk.RIGHT)
 
@@ -1216,6 +1240,54 @@ class ZhCryptGUI:
             "  朋友也要做这一步\n\n"
             "▸ 步骤五：开始聊天\n"
             "  回到本标签 → 选择身份和对方 → 点「连接」")
+
+    def _on_show_safety_number(self):
+        """查看与当前联系人的安全识别码 (带外比对, 审计 #5)。"""
+        peer = self._chat_peer or self.chat_peer_var.get()
+        if not peer:
+            messagebox.showinfo("安全识别码", "请先选择对方身份")
+            return
+        if not self._chat_client:
+            messagebox.showinfo("安全识别码", "请先连接聊天")
+            return
+        res = self._chat_client.get_safety_number(peer)
+        if isinstance(res, dict) and "safety_number" in res:
+            self._show_safety_number_dialog(peer, res["safety_number"], first=False,
+                                            late_pin=res.get("late_pin"))
+            return
+        # 诊断：精确指出缺哪一份公钥，以及可能的身份字符串不一致
+        my_ok = bool(res.get("my_sign")) if isinstance(res, dict) else False
+        peer_ok = bool(res.get("peer_sign")) if isinstance(res, dict) else False
+        tips = []
+        if not my_ok:
+            tips.append("• 我方签名公钥缺失：本机 keys 目录下 <我的身份>.ed25519.pub 不存在"
+                        "（该身份的 Ed25519 密钥未生成或已丢失）。")
+        if not peer_ok:
+            tips.append(
+                f"• 对方 TOFU 公钥缺失：keys 目录下 {peer}.tofu.ed25519.pub 不存在。\n"
+                f"  常见原因：(1) 双方尚未完成一次真正的首次 X3DH 握手；"
+                f"(2) 握手/收消息时存 TOFU 用的身份字符串('{peer}')与对方发来消息里的 "
+                f"msg['from'] 不一致（注意大小写、@后缀、服务器规范化等）。"
+            )
+        detail = res.get("error") if isinstance(res, dict) else str(res)
+        msg = ("无法显示安全识别码，原因如下：\n\n" + "\n".join(tips) +
+               "\n\n建议：确认双方都用同一身份先互发过一条消息（触发首次握手），"
+               "且身份字符串完全一致。\n\n技术细节：\n" + (detail or "未知"))
+        messagebox.showwarning("安全识别码 - 诊断", msg)
+
+    def _show_safety_number_dialog(self, peer, safety_number, first=True, late_pin=False):
+        """弹窗展示安全识别码, 提示带外比对 (审计 #5 残余)。"""
+        prefix = "⚠️ 首次与对方建立端到端加密会话!\n\n" if first else ""
+        if late_pin:
+            prefix += ("注意：本地无该联系人的首次握手(TOFU)记录, 本安全号基于\n"
+                       "服务器当前返回的公钥计算并已固定。请务必与对方带外核对;\n"
+                       "若日后提示公钥变更, 需重新确认身份。\n\n")
+        msg = (prefix +
+               f"与 [{peer}] 的安全识别码:\n\n"
+               f"{safety_number}\n\n"
+               "请通过电话 / 当面等带外方式, 与对方核对以上识别码是否完全一致。\n"
+               "若不一致, 可能遭到中间人攻击, 请勿发送敏感信息!")
+        messagebox.showwarning("安全识别码核对", msg)
 
     def _on_chat_connect(self):
         peer = self.chat_peer_var.get()
@@ -1305,20 +1377,27 @@ class ZhCryptGUI:
 
         items = self._chat_client.process_inbound()
         for item in items:
-            if item.get("action") == "server_message":
-                data = item["data"]
-                if data.get("type") == "message":
-                    result = self._chat_client.receive_chat_message(data["msg"])
-                    if result and "error" not in result:
-                        self._display_chat_message(result)
-                elif data.get("type") == "pending":
-                    for m in data.get("messages", []):
-                        if isinstance(m, dict) and "from" in m:
-                            r = self._chat_client.receive_chat_message(m)
-                            if r and "error" not in r:
-                                self._display_chat_message(r)
-            elif item.get("action") == "error":
-                self._append_chat_msg("error", item["message"])
+            try:
+                if item.get("action") == "server_message":
+                    data = item["data"]
+                    if data.get("type") == "message":
+                        result = self._chat_client.receive_chat_message(data["msg"])
+                        if result and "error" not in result:
+                            self._display_chat_message(result)
+                    elif data.get("type") == "pending":
+                        for m in data.get("messages", []):
+                            if isinstance(m, dict) and "from" in m:
+                                r = self._chat_client.receive_chat_message(m)
+                                if r and "error" not in r:
+                                    self._display_chat_message(r)
+                    elif data.get("type") == "file_upload_ack":
+                        self._on_file_upload_ack(data.get("token", ""))
+                    elif data.get("type") == "file_download_resp":
+                        self._on_file_download_resp(data)
+                elif item.get("action") == "error":
+                    self._append_chat_msg("error", item["message"])
+            except Exception as e:
+                self._append_chat_msg("error", f"处理消息出错: {e}")
 
     def _poll_chat(self):
         if not self._chat_client:
@@ -1326,31 +1405,40 @@ class ZhCryptGUI:
 
         items = self._chat_client.process_inbound()
         new_count = 0
+        self.chat_new_msg_label.config(text="")
         for item in items:
-            if item.get("action") == "server_message":
-                data = item["data"]
-                if data.get("type") == "message":
-                    result = self._chat_client.receive_chat_message(data["msg"])
-                    if result and "error" not in result:
-                        self._display_chat_message(result)
-                        new_count += 1
-                    elif result and "error" in result:
-                        self._append_chat_msg("error", f"解密失败: {result['error']}")
-                elif data.get("type") == "pending":
-                    for m in data.get("messages", []):
-                        if isinstance(m, dict) and "from" in m:
-                            r = self._chat_client.receive_chat_message(m)
-                            if r and "error" not in r:
-                                self._display_chat_message(r)
-                                new_count += 1
-            elif item.get("action") == "error":
-                self._append_chat_msg("error", item["message"])
-            elif item.get("action") == "status":
-                connected = item.get("connected", False)
-                if connected:
-                    self.chat_status_label.config(text="● 已连接", foreground="#27ae60")
-                else:
-                    self.chat_status_label.config(text="● 已断开", foreground="#e74c3c")
+            try:
+                if item.get("action") == "server_message":
+                    data = item["data"]
+                    if data.get("type") == "message":
+                        result = self._chat_client.receive_chat_message(data["msg"])
+                        if result and "error" not in result:
+                            self._display_chat_message(result)
+                            new_count += 1
+                        elif result and "error" in result:
+                            self._append_chat_msg("error", f"解密失败: {result['error']}")
+                    elif data.get("type") == "pending":
+                        for m in data.get("messages", []):
+                            if isinstance(m, dict) and "from" in m:
+                                r = self._chat_client.receive_chat_message(m)
+                                if r and "error" not in r:
+                                    self._display_chat_message(r)
+                                    new_count += 1
+                    elif data.get("type") == "file_upload_ack":
+                        self._on_file_upload_ack(data.get("token", ""))
+                    elif data.get("type") == "file_download_resp":
+                        self._on_file_download_resp(data)
+                elif item.get("action") == "error":
+                    self._append_chat_msg("error", item["message"])
+                elif item.get("action") == "status":
+                    connected = item.get("connected", False)
+                    if connected:
+                        self.chat_status_label.config(text="● 已连接", foreground="#27ae60")
+                    else:
+                        self.chat_status_label.config(text="● 已断开", foreground="#e74c3c")
+            except Exception as e:
+                # 单条消息处理异常不应中断整轮轮询, 否则聊天会卡死
+                self._append_chat_msg("error", f"处理消息出错: {e}")
 
         if not self._chat_client.connected:
             try:
@@ -1378,8 +1466,35 @@ class ZhCryptGUI:
         self.chat_msg_display.config(state=tk.NORMAL)
         is_me = (who == self.chat_identity_var.get())
         display_name = "你" if is_me else who
+
+        # 自己发出的文件消息(服务器回显)不再显示下载链接, 避免与"已发送"重复
+        if text.startswith("[FILE]") and is_me:
+            self.chat_msg_display.config(state=tk.DISABLED)
+            return
+
         self.chat_msg_display.insert(tk.END, f"\n{display_name}  {ts}\n", "p_name")
-        self.chat_msg_display.insert(tk.END, f"{text}\n", "p_bubble")
+
+        if text.startswith("[FILE]"):
+            # 格式: [FILE]<fname>|<fsize>|<key_b64>|<payload>
+            # payload: 小文件=内联密文 base64; 大文件= tok:<token>
+            try:
+                body = text[len("[FILE]"):]
+                fname, fsize, key_b64, payload = body.split("|", 3)
+                fsize_kb = int(fsize) // 1024
+            except Exception:
+                self.chat_msg_display.insert(tk.END, f"{text}\n", "p_bubble")
+            else:
+                link_tag = f"filelink_{len(self._chat_file_msgs)}"
+                self._chat_file_msgs[link_tag] = (fname, fsize, key_b64, payload)
+                link_text = f"[附件] {fname} ({fsize_kb}KB)  [点击下载]"
+                self.chat_msg_display.insert(tk.END, link_text + "\n", link_tag)
+                self.chat_msg_display.tag_config(link_tag, foreground="#2176d4",
+                                                 underline=True)
+                self.chat_msg_display.tag_bind(
+                    link_tag, "<Button-1>",
+                    lambda e, t=link_tag: self._on_chat_download_file(t))
+        else:
+            self.chat_msg_display.insert(tk.END, f"{text}\n", "p_bubble")
         if verified:
             self.chat_msg_display.insert(tk.END, "✓ 签名已验证\n", "verified")
 
@@ -1405,6 +1520,120 @@ class ZhCryptGUI:
         self.chat_msg_display.config(state=tk.DISABLED)
         self.chat_msg_display.see(tk.END)
 
+    # ---- 文件传输: 上传 ack / 下载请求 / 下载响应 / 保存 ----
+
+    def _on_file_upload_ack(self, token):
+        """大文件上传后, 服务端返回 token, 据此把 [FILE] meta 发给接收方。"""
+        if not token or not self._pending_file_upload:
+            return
+        info = self._pending_file_upload
+        self._pending_file_upload = None
+        meta = f"[FILE]{info['fname']}|{info['fsize']}|{info['key_b64']}|tok:{token}"
+        result = self._chat_client.send_chat_message(self._chat_peer, meta)
+        if result.get("error"):
+            self._update_uploading_msg(info, failed=True, err=str(result["error"]))
+            self._append_chat_msg("error", f"文件发送失败: {result['error']}")
+            return
+        self._update_uploading_msg(info, failed=False)
+        self._set_status(f"文件已发送: {info['fname']}", 4000)
+
+    def _update_uploading_msg(self, info, failed=False, err=""):
+        """把"上传中"那条消息更新为已发送/失败, 避免旧消息永久滞留。"""
+        tag = info.get("msg_tag")
+        if not tag:
+            return
+        try:
+            rng = self.chat_msg_display.tag_ranges(tag)
+            if not rng:
+                return
+            fsize_kb = int(info.get("fsize", 0)) // 1024
+            if failed:
+                new_text = f"[附件] {info['fname']} ({fsize_kb}KB) ✗ 发送失败: {err}\n"
+            else:
+                new_text = f"[附件] {info['fname']} ({fsize_kb}KB) ✓ 已发送（对方可下载）\n"
+            self.chat_msg_display.config(state=tk.NORMAL)
+            self.chat_msg_display.delete(rng[0], rng[1])
+            self.chat_msg_display.insert(rng[0], new_text, "p_bubble")
+            self.chat_msg_display.config(state=tk.DISABLED)
+            self.chat_msg_display.see(tk.END)
+        except Exception:
+            pass
+
+    def _check_upload_timeout(self, tag):
+        """60s 后仍在等待该条上传回执, 标记为超时失败。"""
+        if self._pending_file_upload and self._pending_file_upload.get("msg_tag") == tag:
+            info = self._pending_file_upload
+            self._pending_file_upload = None
+            self._update_uploading_msg(info, failed=True,
+                                       err="上传超时（服务器无响应）")
+            self._append_chat_msg("error", "大文件上传超时，请检查网络或服务器后重试")
+
+    def _on_chat_download_file(self, tag):
+        """点击聊天气泡中的 [下载] 链接: 小文件直接解密, 大文件向服务器请求。"""
+        info = self._chat_file_msgs.get(tag)
+        if not info:
+            return
+        fname, fsize, key_b64, payload = info
+        if payload.startswith("tok:"):
+            token = payload[len("tok:"):]
+            self._pending_file_downloads[token] = (fname, key_b64)
+            err = self._chat_client.request_file_download(token)
+            if err:
+                self._pending_file_downloads.pop(token, None)
+                self._append_chat_msg("error", f"请求下载失败: {err}")
+                return
+            self._set_status(f"正在下载 {fname} ...", 0)
+            self._append_chat_msg("system", f"正在下载 {fname} (等待服务器响应)...")
+        else:
+            try:
+                cipher = base64.b64decode(payload)
+            except Exception as e:
+                self._append_chat_msg("error", f"文件解码失败: {e}")
+                return
+            self._decrypt_and_save(fname, key_b64, cipher)
+
+    def _on_file_download_resp(self, data):
+        """收到服务器 file_download_resp: 取出密文并解密保存。"""
+        token = data.get("token", "")
+        pending = self._pending_file_downloads.pop(token, None)
+        if pending is None:
+            return
+        fname, key_b64 = pending
+        file_data_b64 = data.get("file_data", "")
+        try:
+            cipher = base64.b64decode(file_data_b64)
+        except Exception as e:
+            self._append_chat_msg("error", f"文件下载失败: 数据解码错误 {e}")
+            return
+        self._decrypt_and_save(fname, key_b64, cipher)
+
+    def _decrypt_and_save(self, fname, key_b64, cipher):
+        """用文件密钥 AESGCM 解密, 弹出保存对话框落盘。"""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        try:
+            key = base64.b64decode(key_b64)
+            if len(cipher) <= 12:
+                raise ValueError("密文长度异常")
+            nonce = cipher[:12]
+            enc = cipher[12:]
+            plain = AESGCM(key).decrypt(nonce, enc, None)
+        except Exception as e:
+            self._append_chat_msg("error", f"文件解密失败: {e}")
+            return
+        import tkinter.filedialog as fd
+        default = os.path.basename(fname) or "download.bin"
+        save_path = fd.asksaveasfilename(
+            defaultextension="", initialfile=default, title="保存接收到的文件")
+        if not save_path:
+            return
+        try:
+            with open(save_path, "wb") as f:
+                f.write(plain)
+            self._append_chat_msg("system", f"文件已保存: {save_path}")
+            self._set_status(f"文件已下载: {default}", 4000)
+        except Exception as e:
+            self._append_chat_msg("error", f"保存失败: {e}")
+
     def _on_chat_send(self):
         text = self.chat_input.get("1.0", "end-1c").strip()
         if not text:
@@ -1424,6 +1653,10 @@ class ZhCryptGUI:
             if result.get("error"):
                 self._append_chat_msg("error", f"发送失败: {result['error']}")
                 return
+
+            # 审计 #5 残余: 首次握手完成, 强制提示带外比对安全识别码
+            if result.get("first_contact") and result.get("safety_number"):
+                self._show_safety_number_dialog(peer, result.get("safety_number"), first=True)
 
             self._display_chat_message({
                 "from": self.chat_identity_var.get(),
@@ -1478,8 +1711,8 @@ class ZhCryptGUI:
         fsize = _os.path.getsize(path)
         fname = _os.path.basename(path)
 
-        if fsize > 500 * 1024 * 1024:
-            messagebox.showwarning("警告", "文件超过 500MB，不支持传输")
+        if fsize > 40 * 1024 * 1024:
+            messagebox.showwarning("警告", "文件超过 40MB，不支持传输")
             return
 
         self._set_status(f"正在发送 {fname} ({fsize//1024}KB)...", 0)
@@ -1498,12 +1731,31 @@ class ZhCryptGUI:
 
             if fsize > 500 * 1024:
                 if self._chat_client.ws_ready and self._chat_client.ws:
-                    self._chat_client._send_queue.put_nowait(json.dumps({
-                        "type": "file_upload",
-                        "file_data": file_b64,
-                    }))
-                    key_b64 = base64.b64encode(file_key).decode("ascii")
-                    meta = f"[FILE]{fname}|{fsize}|{key_b64}|uploaded"
+                    # 先上传密文到服务器, 等 file_upload_ack 拿到 token 后再发 [FILE] meta
+                    err = self._chat_client.upload_file(file_b64, self._chat_peer)
+                    if err:
+                        messagebox.showerror("错误", f"文件上传失败: {err}")
+                        return
+                    self._pending_file_upload = {
+                        "fname": fname,
+                        "fsize": fsize,
+                        "key_b64": base64.b64encode(file_key).decode("ascii"),
+                    }
+                    self._set_status(f"正在上传 {fname} ...", 0)
+                    tag = f"uploading_{int(time.time()*1000)}"
+                    self._pending_file_upload["msg_tag"] = tag
+                    self.chat_msg_display.config(state=tk.NORMAL)
+                    self.chat_msg_display.insert(
+                        tk.END, f"\n你  {time.strftime('%H:%M')}\n", "p_name")
+                    self.chat_msg_display.insert(
+                        tk.END,
+                        f"[附件] {fname} ({fsize//1024}KB) [上传中...]\n",
+                        tag)
+                    self.chat_msg_display.config(state=tk.DISABLED)
+                    self.chat_msg_display.see(tk.END)
+                    # 60s 超时保护: 若服务器无回执, 标记为失败, 不再永久转圈
+                    self.root.after(60000, lambda t=tag: self._check_upload_timeout(t))
+                    return
                 else:
                     messagebox.showerror("错误", "WebSocket 未连接，无法上传大文件")
                     return
@@ -1514,7 +1766,7 @@ class ZhCryptGUI:
             self._display_chat_message({
                 "from": self.chat_identity_var.get(),
                 "timestamp": time.time(),
-                "text": f"📎 {fname} ({fsize//1024}KB)",
+                "text": f"[附件] {fname} ({fsize//1024}KB) ✓ 已发送（对方可下载）",
                 "verified": True,
             })
             result = self._chat_client.send_chat_message(self._chat_peer, meta)

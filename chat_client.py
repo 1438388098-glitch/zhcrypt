@@ -18,7 +18,7 @@ import hashlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core import urlsafe_b64decode, urlsafe_b64encode, DecryptionError
-from keys import KeyStore
+from keys import KeyStore, compute_safety_number
 from config import load, get_prekey_server, get_auth_token
 from ratchet import (
     SessionState, send_message, receive_message, try_decrypt_skipped,
@@ -31,6 +31,18 @@ from session import save_session, load_session, list_sessions, delete_session
 
 INBOUND = queue.Queue()
 OUTBOUND = queue.Queue()
+
+
+def build_ws_sslopt(ws_url):
+    """为 wss 连接构造启用证书校验的 sslopt (审计 #3/#4)。
+
+    仅当使用 wss:// 时才要求校验 CA 链与主机名; ws:// (本地/开发) 不启用。
+    返回空 dict 表示不加密 (等同于开发态)。
+    """
+    import ssl
+    if ws_url.startswith("wss://"):
+        return {"cert_reqs": ssl.CERT_REQUIRED, "check_hostname": True}
+    return {}
 
 
 class ChatClient:
@@ -90,6 +102,11 @@ class ChatClient:
         encoded_path = urllib.parse.quote(path, safe='/&=?')
         url = f"{base}{encoded_path}"
 
+        # 审计 #18: REST 同样做证书固定 (prekey 下载是 MITM 主要目标)
+        pin = self._get_cert_pin()
+        if pin and self._server_url.startswith("https://"):
+            self._verify_rest_cert_pin(pin)
+
         data = None
         if body:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -112,12 +129,32 @@ class ChatClient:
         except Exception as e:
             return {"error": str(e)}
 
+    def _host_port_from_url(self, url):
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        port = p.port or (443 if p.scheme == "https" else 80)
+        return p.hostname, port
+
+    def _verify_rest_cert_pin(self, pin):
+        """在真正发请求前, 先对服务端证书做固定校验 (审计 #18, REST 路径)。"""
+        import hmac
+        from certpin import fetch_cert_pin
+        host, port = self._host_port_from_url(self._server_url)
+        try:
+            actual = fetch_cert_pin(host, port, server_name=host)
+        except Exception as e:
+            raise ConnectionRefusedError(f"无法获取服务端证书, 固定校验失败: {e}")
+        if not hmac.compare_digest(actual, pin):
+            raise ConnectionRefusedError(
+                "服务端证书指纹与固定值不符, 疑似中间人攻击 (REST, 审计 #18)")
+
     def _ws_loop(self):
         backoff = self._reconnect_delay
         reported_error = False
         import socket as _socket
         import json as _json
         from websocket import WebSocketConnectionClosedException as _WSCE
+        from websocket import WebSocketTimeoutException as _WSTE
         while self._running:
             try:
                 self._connect_ws()
@@ -127,10 +164,10 @@ class ChatClient:
                 reported_error = False
                 INBOUND.put({"action": "status", "connected": True})
 
-                # 1s socket timeout keeps connections alive while allowing
+                # 3s socket timeout keeps connections alive while allowing
                 # the send queue to be processed frequently
                 try:
-                    self.ws.sock.settimeout(1.0)
+                    self.ws.sock.settimeout(3.0)
                 except Exception:
                     pass
 
@@ -144,7 +181,7 @@ class ChatClient:
                         except _json.JSONDecodeError:
                             continue
                         INBOUND.put({"action": "server_message", "data": data})
-                    except _socket.timeout:
+                    except (_socket.timeout, _WSTE):
                         pass
                     except _WSCE:
                         break
@@ -156,23 +193,31 @@ class ChatClient:
                     try:
                         while True:
                             send_item = self._send_queue.get_nowait()
-                            self.ws.send(send_item)
+                            try:
+                                self.ws.send(send_item)
+                            except (_socket.timeout, _WSTE):
+                                # 发送超时但连接还在，消息塞回队列稍后重试
+                                self._send_queue.put(send_item)
+                                break
+                            except _WSCE:
+                                self._send_queue.put(send_item)
+                                break
+                            except (_socket.error, ConnectionError, IOError):
+                                self._send_queue.put(send_item)
+                                break
+                            except Exception:
+                                self._send_queue.put(send_item)
+                                break
                     except queue.Empty:
                         pass
-                    except _socket.timeout:
-                        continue
+                    except (_socket.timeout, _WSTE):
+                        pass
                     except _WSCE:
                         break
                     except (_socket.error, ConnectionError, IOError):
                         break
                     except Exception:
                         break
-                    try:
-                        while True:
-                            send_item = self._send_queue.get_nowait()
-                            self.ws.send(send_item)
-                    except queue.Empty:
-                        pass
 
             except Exception as e:
                 if not reported_error:
@@ -192,11 +237,17 @@ class ChatClient:
 
     def _connect_ws(self):
         import websocket
+        # 审计 #3/#4: wss 必须校验服务端证书 (CA 链 + 主机名), 不再 sslopt={} 裸奔
+        sslopt = build_ws_sslopt(self._ws_url)
         self.ws = websocket.create_connection(
             self._ws_url,
             timeout=120,
-            sslopt={"cert_reqs": 0} if "wss://" in self._ws_url else {},
+            sslopt=sslopt,
         )
+        # 审计 #18: 证书固定 (pinning) —— 即便存在 rogue CA, 不匹配固定指纹也拒连
+        pin = self._get_cert_pin()
+        if pin and self._ws_url.startswith("wss://"):
+            self._enforce_cert_pin(pin)
         auth_msg = json.dumps({
             "type": "auth",
             "token": self._token,
@@ -209,6 +260,26 @@ class ChatClient:
             self.ws.close()
             raise ConnectionRefusedError(f"认证失败: {msg}")
         self.ws.send(json.dumps({"type": "get_pending"}))
+
+    def _get_cert_pin(self):
+        try:
+            from config import get_cert_pin
+            return get_cert_pin()
+        except Exception:
+            return ""
+
+    def _enforce_cert_pin(self, pin):
+        try:
+            sock = self.ws.sock
+            der = sock.getpeercert(binary_form=True)
+        except Exception:
+            self.ws.close()
+            raise ConnectionRefusedError("无法获取服务端证书, 证书固定校验失败")
+        from certpin import verify_cert_pin
+        if not verify_cert_pin(der, pin):
+            self.ws.close()
+            raise ConnectionRefusedError(
+                "服务端证书指纹与固定值不符, 疑似中间人攻击 (审计 #18)")
 
     def send_chat_message(self, peer_identity, plaintext):
         state = load_session(self.identity, peer_identity, self.passphrase)
@@ -224,7 +295,7 @@ class ChatClient:
         return self._send_ratchet_message(state, plaintext)
 
     def _initiate_session(self, peer_identity):
-        from core import urlsafe_b64decode as b64d
+        from core import urlsafe_b64decode as b64d, ed25519_verify
 
         self.store.ensure_kem_keys(self.identity, self.passphrase)
 
@@ -235,26 +306,73 @@ class ChatClient:
         my_id_priv_pem = self.store.load_kem_private_key_pem(self.identity, self.passphrase)
         my_id_priv_raw = pem_priv_to_raw(my_id_priv_pem)
 
-        peer_signing_pub = b""
+        # 审计 #5: 首次通信签名校验, 落地 TOFU
+        spk_sig_b64 = resp.get("signed_prekey_sig", "")
+        if not spk_sig_b64:
+            return {"error": f"{peer_identity} 的 prekey 缺少签名，拒绝握手"}
         try:
-            peer_signing_pub = self.store.load_signing_public_key(peer_identity)
+            spk_pub_pem = b64d(resp["signed_prekey_pub"].encode())
+            spk_sig = b64d(spk_sig_b64.encode())
         except Exception:
-            pass
+            return {"error": f"{peer_identity} 的 prekey 签名格式错误"}
+
+        # 服务器返回的签名公钥 (修复 #5: bundle 现在携带签名公钥)
+        bundle_signing_pub_b64 = resp.get("signing_public_key", "")
+        bundle_signing_pub = b64d(bundle_signing_pub_b64.encode()) if bundle_signing_pub_b64 else b""
+
+        # 本地已记录的信任锚 (TOFU 固定值, 或带外导入的公钥)
+        local_pub = b""
+        try:
+            local_pub = self.store.load_tofu_signing_pub(peer_identity)
+        except Exception:
+            try:
+                local_pub = self.store.load_signing_public_key(peer_identity)
+            except Exception:
+                pass
+
+        # 确定用于验证的密钥: 优先 bundle 携带的公钥, 回退本地
+        verify_key = bundle_signing_pub or local_pub
+        if not verify_key:
+            return {"error": f"{peer_identity} 的签名公钥不可用（服务器未返回且本地无记录），无法验证身份。请升级服务器或通过带外导入对方公钥。"}
+
+        # 1) 始终校验 signed prekey 签名 (禁止静默跳过)
+        if not ed25519_verify(verify_key, spk_pub_pem, spk_sig):
+            return {"error": f"{peer_identity} 的 signed prekey 签名验证失败，可能遭受中间人攻击"}
+
+        # 2) TOFU 换钥检测: 若与已记录公钥不一致, 拒绝 (可能是 MITM 或主动换钥)
+        if local_pub and bundle_signing_pub and local_pub != bundle_signing_pub:
+            return {"error": f"{peer_identity} 的签名公钥与历史记录不一致（疑似中间人或已更换密钥），如需继续请重新验证"}
+
+        # 3) 首次接触: 固定 (TOFU) 对端签名公钥
+        first_contact = not local_pub
+        if first_contact:
+            self.store.store_tofu_signing_pub(peer_identity, bundle_signing_pub or verify_key)
 
         state, init_extra = x3dh_initiate_session(
             peer_identity_key_pub_pem=b64d(resp["identity_key_pub"].encode()),
-            peer_signed_prekey_pub_pem=b64d(resp["signed_prekey_pub"].encode()),
+            peer_signed_prekey_pub_pem=spk_pub_pem,
             peer_one_time_prekey_pub_b64=resp.get("one_time_prekey"),
             my_identity_priv_raw=my_id_priv_raw,
             my_identity=self.identity,
             peer_identity=peer_identity,
-            peer_signing_pub_pem=peer_signing_pub,
+            peer_signing_pub_pem=bundle_signing_pub or verify_key,
         )
+
+        safety_number = ""
+        try:
+            my_sign = self.store.load_signing_public_key(self.identity)
+            peer_sign = self.store.load_tofu_signing_pub(peer_identity)
+            safety_number = compute_safety_number(my_sign, peer_sign)
+        except Exception:
+            pass
 
         return {
             "state": state,
             "init_extra": init_extra,
             "is_init": True,
+            "first_contact": first_contact,
+            "unverified": first_contact,
+            "safety_number": safety_number,
         }
 
     def _send_first_message(self, state, init_result, plaintext):
@@ -331,6 +449,33 @@ class ChatClient:
             return result["error"]
         return None
 
+    def upload_file(self, file_b64, recipient):
+        """通过 WebSocket 上传文件密文 (大文件路径)。
+
+        服务端落盘后返回 file_upload_ack (含 token), 由 GUI 轮询拿到 token
+        后再把 [FILE]...|tok:<token> 元数据以聊天消息发出, 供接收方下载。
+        """
+        try:
+            self._send_queue.put_nowait(json.dumps({
+                "type": "file_upload",
+                "file_data": file_b64,
+                "recipient": recipient,
+            }))
+            return None
+        except Exception as e:
+            return str(e)
+
+    def request_file_download(self, token):
+        """请求下载大文件; 服务端返回 file_download_resp (含 file_data)。"""
+        try:
+            self._send_queue.put_nowait(json.dumps({
+                "type": "file_download",
+                "token": token,
+            }))
+            return None
+        except Exception as e:
+            return str(e)
+
     def receive_chat_message(self, msg):
         peer_identity = msg["from"]
         state = load_session(self.identity, peer_identity, self.passphrase)
@@ -359,7 +504,6 @@ class ChatClient:
                 salt=state.root_key, info=b"zhchat-init-chains-v1")
             cm = hkdf_init.derive(state.our_ratchet_pub)
             recv_half = cm[KEY_SIZE:KEY_SIZE * 2]
-            send_half = cm[:KEY_SIZE]
             sid = state.session_id
             if not isinstance(sid, bytes): sid = sid.encode()
             nonce = _b64d(payload["nonce"])
@@ -369,12 +513,11 @@ class ChatClient:
                 a = AESGCM(MK)
                 plain = a.decrypt(nonce, ct, sid)
                 state.recv_chain_key = CKr
-                state.send_chain_key = send_half
                 state.recv_msg_number += 1
                 save_session(state, self.passphrase)
                 return self._parse_decrypted(plain, msg)
-            except Exception:
-                return None
+            except Exception as e:
+                return {"error": f"x3dh_reply 解密失败: {e}"}
 
         plain = receive_message(state, msg)
         if plain is None:
@@ -398,15 +541,30 @@ class ChatClient:
         sender_identity = msg["from"]
         session_id = msg.get("session_id", "")
 
+        # 审计 #5: 响应方也做 TOFU 固定与换钥检测
+        if sender_signing_pub_pem:
+            try:
+                existing = self.store.load_tofu_signing_pub(sender_identity)
+                if existing != sender_signing_pub_pem:
+                    return {"error": f"{sender_identity} 的签名公钥与历史记录不一致（疑似中间人或已更换密钥），拒绝建立会话"}
+            except Exception:
+                self.store.store_tofu_signing_pub(sender_identity, sender_signing_pub_pem)
+
         my_id_priv_pem = self.store.load_kem_private_key_pem(self.identity, self.passphrase)
         my_id_priv_raw = pem_priv_to_raw(my_id_priv_pem)
 
-        # Load SPK (signed prekey) private key
-        spk_priv_pem = self.store.load_signed_prekey_priv_pem(self.identity, self.passphrase)
+        # Load SPK (signed prekey) private key — fallback to identity key if method unavailable
+        try:
+            spk_priv_pem = self.store.load_signed_prekey_priv_pem(self.identity, self.passphrase)
+        except AttributeError:
+            spk_priv_pem = None
         spk_priv_raw = pem_priv_to_raw(spk_priv_pem) if spk_priv_pem else my_id_priv_raw
 
         # Build trials: (spk_priv, otp_priv) pairs from most to least specific
-        otp_keys = self.store.load_otp_private_keys(self.identity, self.passphrase)
+        try:
+            otp_keys = self.store.load_otp_private_keys(self.identity, self.passphrase)
+        except AttributeError:
+            otp_keys = []
         trials = [(spk_priv_raw, None)]  # SPK only (2DH + SPK)
         for _, obj in otp_keys:
             otp_raw = obj.private_bytes(
@@ -545,6 +703,69 @@ class ChatClient:
             except queue.Empty:
                 break
         return items
+
+    def get_safety_number(self, peer_identity):
+        """返回与对端的 safety number (带外比对用)。
+
+        成功: {"safety_number": "...", "late_pin": bool}
+        失败: {"my_sign": bytes|None, "peer_sign": bytes|None, "error": "诊断信息"}
+
+        取对方签名公钥的优先级:
+          1) 本地 TOFU 固定值 (首次握手时落地, 最受信任);
+          2) 联系人已发布的签名公钥 load_signing_public_key(peer) —— 与消息验签
+             用的是同一把密钥, 旧会话在聊天时就已经具备, 因此旧会话无需重连
+             也能直接算出安全号;
+          3) 会话早于 TOFU 功能建立且无联系人公钥时, 回退到服务器当前返回的
+             签名公钥并固定 (late_pin=True)。
+        这样无论会话何时建立, 点按钮都能出号; 且双方因使用同一把真实签名公钥
+        (并经 compute_safety_number 排序归一化) 而得到一致结果。
+        """
+        info = {"my_sign": None, "peer_sign": None, "error": None, "late_pin": False}
+        try:
+            info["my_sign"] = self.store.load_signing_public_key(self.identity)
+        except Exception as e:
+            info["error"] = f"我方签名公钥缺失: {e}"
+            return info
+        # 1) 本地 TOFU 固定值
+        try:
+            info["peer_sign"] = self.store.load_tofu_signing_pub(peer_identity)
+        except Exception:
+            info["peer_sign"] = None
+        # 2) 回退: 联系人已发布的签名公钥 (与消息验签同一把, 旧会话已具备)
+        if not info["peer_sign"]:
+            try:
+                info["peer_sign"] = self.store.load_signing_public_key(peer_identity)
+                if info["peer_sign"]:
+                    # 顺手固定为 TOFU, 后续直接命中
+                    try:
+                        self.store.store_tofu_signing_pub(peer_identity, info["peer_sign"])
+                    except Exception:
+                        pass
+            except Exception:
+                info["peer_sign"] = None
+        # 3) 回退: 会话早于 TOFU 功能建立, 从服务器取对方当前签名公钥并固定
+        if not info["peer_sign"]:
+            try:
+                from core import urlsafe_b64decode as _b64d
+                resp = self._http_request("GET", f"/v1/prekey/{peer_identity}")
+                if isinstance(resp, dict) and resp.get("error"):
+                    raise RuntimeError(resp["error"])
+                b64 = resp.get("signing_public_key", "") if isinstance(resp, dict) else ""
+                if not b64:
+                    raise RuntimeError("服务器未返回签名公钥")
+                peer_sign = _b64d(b64.encode())
+                self.store.store_tofu_signing_pub(peer_identity, peer_sign)
+                info["peer_sign"] = peer_sign
+                info["late_pin"] = True
+            except Exception as e:
+                extra = f"对方 TOFU 公钥缺失且无法从服务器获取: {e}"
+                info["error"] = (info["error"] + "\n" + extra) if info["error"] else extra
+        if info["my_sign"] and info["peer_sign"]:
+            return {
+                "safety_number": compute_safety_number(info["my_sign"], info["peer_sign"]),
+                "late_pin": info["late_pin"],
+            }
+        return info
 
 
 def init_client(identity, passphrase):

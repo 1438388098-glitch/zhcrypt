@@ -371,12 +371,15 @@ def cmd_info(args):
 
 
 def cmd_set_server(args):
-    """配置 prekey 服务器地址"""
+    """配置 prekey 服务器地址、token 与证书固定指纹"""
     url = args.url.rstrip("/")
     token = args.token or ""
     if not url.startswith("http"):
         _fail("服务器地址必须以 http:// 或 https:// 开头")
     set_prekey_server(url, token)
+    if getattr(args, "pin", None):
+        set_cert_pin(args.pin)
+        _ok(f"已启用证书固定 (pin): {args.pin}")
     _ok(f"Prekey 服务器已设置为: {url}")
 
 
@@ -669,6 +672,43 @@ def cmd_set_params(args):
     _warn("新参数仅影响后续加密, 已有密文不受影响")
 
 
+def cmd_chat_safety(args):
+    """显示与某联系人的安全识别码, 用于带外比对 (审计 #5 残余)。"""
+    from config import get
+    identity = args.identity or get("default_identity", "default")
+    peer = args.peer
+    passphrase = getpass.getpass(f"[{identity}] 请输入你的私钥密码: ")
+    from chat_client import ChatClient
+    client = ChatClient(identity, passphrase)
+    sn = client.get_safety_number(peer)
+    if not sn:
+        _warn(f"尚未与 '{peer}' 建立会话或本地无其 TOFU 公钥记录")
+        _info("提示: 先发送一条消息完成首次握手, 再查看安全识别码")
+        return
+    _info(f"与 [{peer}] 的安全识别码 (请通过电话/当面等带外方式比对是否一致):")
+    _info("  " + sn)
+    _info("若与对方显示的不一致, 可能遭到中间人攻击, 请勿发送敏感信息!")
+
+
+def cmd_cert_pin(args):
+    """获取服务器证书固定指纹 (审计 #18 诊断工具)。"""
+    from urllib.parse import urlparse
+    from certpin import fetch_cert_pin
+    parsed = urlparse(args.url)
+    if parsed.scheme not in ("https", "wss"):
+        _fail("请提供 https:// 或 wss:// 地址")
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 443)
+    try:
+        pin = fetch_cert_pin(host, port, server_name=host)
+    except Exception as e:
+        _fail(f"获取证书指纹失败: {e}")
+    _ok(f"服务器 {host}:{port} 的证书固定指纹:")
+    _info("  " + pin)
+    _info("将其写入配置以启用证书固定:")
+    _info(f"  zhcrypt set-server {args.url} --pin {pin}")
+
+
 def cmd_chat_send(args):
     from config import get
     identity = args.identity or get("default_identity", "default")
@@ -685,6 +725,14 @@ def cmd_chat_send(args):
     result = client.send_chat_message(peer, text)
     if result.get("error"):
         _error(result["error"])
+    elif result.get("first_contact"):
+        # 审计 #5 残余: 首次握手完成, 强制提示带外比对安全识别码
+        sn = result.get("safety_number", "")
+        _warn("⚠️  首次与此联系人建立端到端加密会话!")
+        _warn("请通过电话/当面等带外方式, 与对方比对以下安全识别码是否完全一致:")
+        print("     " + sn)
+        _warn("若不一致, 可能遭到中间人攻击, 请勿发送敏感信息!")
+        _ok(f"已发送 ({result.get('type', 'message')}) id={result.get('msg_id', '?')[:8]}...")
     else:
         _ok(f"已发送 ({result.get('type', 'message')}) id={result.get('msg_id', '?')[:8]}...")
     client.stop()
@@ -843,8 +891,9 @@ def main():
     p_info = sub.add_parser("info", help="显示系统信息")
 
     p_ss = sub.add_parser("set-server", help="配置 prekey 服务器地址")
-    p_ss.add_argument("url", help="服务器 URL (如 https://[REDACTED_IP])")
-    p_ss.add_argument("--token", default="", help="API 鉴权 Token")
+    p_ss.add_argument("url", help="服务器 URL (如 https://your-prekey-server.example.com)")
+    p_ss.add_argument("--token", default="", help="API 鉴权 Token (将以设备密钥加密存储, 审计 #8)")
+    p_ss.add_argument("--pin", default=None, help="服务端证书固定指纹 (启用 pinning, 审计 #18)")
 
     p_upload = sub.add_parser("upload-prekey", help="上传 prekey 到服务器")
     p_upload.add_argument("identity", nargs="?", default="default", help="身份名称")
@@ -895,6 +944,15 @@ def main():
     p_chat_delete.add_argument("-t", "--peer", required=True, help="对方身份")
     p_chat_delete.add_argument("-i", "--identity", default=None, help="你的身份")
 
+    p_chat_safety = sub.add_parser("chat-safety",
+        help="显示与某联系人的安全识别码 (带外比对, 审计 #5)")
+    p_chat_safety.add_argument("-t", "--peer", required=True, help="对方身份")
+    p_chat_safety.add_argument("-i", "--identity", default=None, help="你的身份")
+
+    p_cert_pin = sub.add_parser("cert-pin",
+        help="获取服务器证书固定指纹 (记录到配置以启用 pinning, 审计 #18)")
+    p_cert_pin.add_argument("url", help="服务器地址, 如 https://example.com")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -926,6 +984,8 @@ def main():
         "chat-history": cmd_chat_history,
         "chat-status": cmd_chat_status,
         "chat-delete": cmd_chat_delete,
+        "chat-safety": cmd_chat_safety,
+        "cert-pin": cmd_cert_pin,
         "chat": cmd_chat_poll,
     }
 
