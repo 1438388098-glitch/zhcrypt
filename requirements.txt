@@ -1,2 +1,11 @@
+# zhcrypt 依赖清单 (全量聚合, 供本地开发/测试一键安装)
+#
+# 已按部署角色拆分, 新部署请按需选用:
+#   requirements-server.txt  - 服务器 (Flask / gunicorn / websockets + 加密库)
+#   requirements-client.txt  - 客户端 (websocket-client + 加密库)
 cryptography>=3.0
 argon2-cffi>=21.1
+Flask>=2.0
+gunicorn>=20.0
+websockets>=9.0
+websocket-client>=1.0

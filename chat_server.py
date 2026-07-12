@@ -23,6 +23,19 @@ try:
 except ImportError:
     sys.exit("websockets 未安装: pip install websockets")
 
+import logging
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
+log = logging.getLogger("zhcrypt")
+
+from schema import (
+    MESSAGES_TABLE_SQL,
+    MESSAGES_IDX_RECIPIENT_SQL,
+    MESSAGES_IDX_SESSION_SQL,
+    FILES_TABLE_SQL,
+    add_column,
+)
+
 DB_PATH = os.environ.get("ZHPREKEY_DB",
                          os.path.join(os.path.dirname(__file__), "zhprekey.db"))
 AUTH_TOKEN = os.environ.get("ZHPREKEY_TOKEN", "")
@@ -46,72 +59,34 @@ connected_clients = {}
 rate_limit_buckets = {}
 
 
-PREKEY_RATE_LIMIT_PER_MINUTE = int(os.environ.get("ZHCHAT_PREKEY_RATE_LIMIT", "10"))
-prekey_rate_limit_buckets = {}
 
-
-PREKEY_RATE_LIMIT_PER_MINUTE = int(os.environ.get("ZHCHAT_PREKEY_RATE_LIMIT", "10"))
-prekey_rate_limit_buckets = {}
-
-
-def _check_prekey_rate_limit(identity):
-    """V7: prekey 获取速率限制（每分钟 10 次）"""
-    now = _now()
-    bucket = prekey_rate_limit_buckets.get(identity, [])
-    bucket = [t for t in bucket if now - t < 60]
-    prekey_rate_limit_buckets[identity] = bucket
-    if len(bucket) >= PREKEY_RATE_LIMIT_PER_MINUTE:
-        return False
-    bucket.append(now)
-    return True
 
 
 def init_message_db():
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            sender TEXT NOT NULL,
-            recipient TEXT NOT NULL,
-            type TEXT NOT NULL DEFAULT 'message',
-            payload_json TEXT NOT NULL,
-            server_ts REAL NOT NULL,
-            delivered_at REAL,
-            delivery_ack_at REAL
-        )
-    """)
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_messages_recipient
-        ON messages(recipient, delivered_at, server_ts)
-    """)
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_messages_session
-        ON messages(session_id, server_ts)
-    """)
+    db = _connect()
+    db.execute(MESSAGES_TABLE_SQL)
+    db.execute(MESSAGES_IDX_RECIPIENT_SQL)
+    db.execute(MESSAGES_IDX_SESSION_SQL)
     # V5: 文件元数据表，记录上传者与关联消息
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            token TEXT PRIMARY KEY,
-            uploader TEXT NOT NULL,
-            intended_recipient TEXT,
-            server_ts REAL NOT NULL
-        )
-    """)
+    db.execute(FILES_TABLE_SQL)
     # 兼容旧库: 补齐 intended_recipient 列 (审计 #7)
-    try:
-        cols = [r[1] for r in db.execute("PRAGMA table_info(files)")]
-        if "intended_recipient" not in cols:
-            db.execute("ALTER TABLE files ADD COLUMN intended_recipient TEXT")
-    except Exception:
-        pass
+    add_column(db, "files", "intended_recipient", "TEXT")
     db.commit()
     db.close()
 
 
 def _now():
     return time.time()
+
+
+def _connect():
+    """统一的 SQLite 连接 (O1-B 架构优化): WAL + busy_timeout=5000。
+    让 gunicorn 多 worker 与 WS 服务并发写同一库时自动等待而非报 database is locked。"""
+    db = sqlite3.connect(DB_PATH)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("PRAGMA busy_timeout=5000")
+    return db
 
 
 def record_file_upload(db, token, uploader, recipient):
@@ -166,8 +141,7 @@ def check_rate_limit(identity):
 
 def store_message(msg_data):
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.execute("PRAGMA journal_mode=WAL")
+        db = _connect()
         db.execute("""
             INSERT OR IGNORE INTO messages
             (id, session_id, sender, recipient, type, payload_json, server_ts)
@@ -186,15 +160,14 @@ def store_message(msg_data):
         return True
     except Exception as e:
         import sys
-        print(f"[chat_server] store_message failed: {e}", file=sys.stderr)
+        log.error(f"[chat_server] store_message failed: {e}")
         return False
 
 
 def mark_delivered(msg_ids):
     if not msg_ids:
         return
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA journal_mode=WAL")
+    db = _connect()
     now = _now()
     db.executemany(
         "UPDATE messages SET delivered_at = ? WHERE id = ?",
@@ -205,7 +178,7 @@ def mark_delivered(msg_ids):
 
 
 def get_pending_messages(identity, limit=50):
-    db = sqlite3.connect(DB_PATH)
+    db = _connect()
     db.row_factory = sqlite3.Row
     rows = db.execute("""
         SELECT * FROM messages
@@ -234,7 +207,7 @@ def get_pending_messages(identity, limit=50):
 
 def fetch_pending_messages(identity, limit=50):
     """仅拉取 pending 消息，不标记 delivered（供 WS 使用）"""
-    db = sqlite3.connect(DB_PATH)
+    db = _connect()
     db.row_factory = sqlite3.Row
     rows = db.execute("""
         SELECT * FROM messages
@@ -257,7 +230,7 @@ def fetch_pending_messages(identity, limit=50):
 
 
 def get_history(identity, peer, before_id=None, limit=50):
-    db = sqlite3.connect(DB_PATH)
+    db = _connect()
     db.row_factory = sqlite3.Row
     if before_id:
         rows = db.execute("""
@@ -283,7 +256,7 @@ def get_history(identity, peer, before_id=None, limit=50):
 
 def cleanup_old_messages():
     cutoff = _now() - MESSAGE_RETENTION_DAYS * 86400
-    db = sqlite3.connect(DB_PATH)
+    db = _connect()
     deleted = db.execute("DELETE FROM messages WHERE server_ts < ?", (cutoff,)).rowcount
     db.commit()
     db.close()
@@ -398,7 +371,7 @@ async def handler(websocket, path=None):
                 with open(file_path, "wb") as f:
                     f.write(base64.b64decode(file_data_b64))
                 # V5/#7: 记录上传者身份与预期接收方 (接收方由客户端在发送文件时提供)
-                db = sqlite3.connect(DB_PATH)
+                db = _connect()
                 record_file_upload(db, token, identity, data.get("recipient", ""))
                 db.close()
                 await websocket.send(json.dumps({
@@ -416,7 +389,7 @@ async def handler(websocket, path=None):
                         {"type": "error", "code": 404, "message": "file not found"}))
                     continue
                 # V5/#7: 授权 = 上传者本人 或 预期接收方
-                db = sqlite3.connect(DB_PATH)
+                db = _connect()
                 db.row_factory = sqlite3.Row
                 allowed = can_download_file(db, token, identity)
                 db.close()
@@ -433,7 +406,7 @@ async def handler(websocket, path=None):
                 }))                # 阅后即焚: 接收方已取到密文, 立即删除服务器文件, 不留存
                 try:
                     os.remove(file_path)
-                    print("[file] deleted after download: " + token)
+                    log.info("[file] deleted after download: " + token)
                 except OSError:
                     pass
 
@@ -454,9 +427,9 @@ async def cleanup_loop():
         try:
             deleted = cleanup_old_messages()
             if deleted:
-                print(f"[cleanup] deleted {deleted} old messages")
+                log.info(f"[cleanup] deleted {deleted} old messages")
         except Exception as e:
-            print(f"[cleanup] error: {e}")
+            log.info(f"[cleanup] error: {e}")
         try:
             cutoff = _now() - 1800
             count = 0
@@ -466,19 +439,19 @@ async def cleanup_loop():
                     os.remove(fpath)
                     count += 1
             if count:
-                print(f"[cleanup] deleted {count} old files")
+                log.info(f"[cleanup] deleted {count} old files")
         except Exception as e:
-            print(f"[cleanup] file error: {e}")
+            log.info(f"[cleanup] file error: {e}")
 
 
 async def main():
     init_message_db()
-    print(f"zhchat WebSocket Server starting...")
-    print(f"  DB: {DB_PATH}")
-    print("  Auth Token: *** (已隐藏)")
-    print(f"  Retention: {MESSAGE_RETENTION_DAYS} days")
-    print(f"  Rate limit: {RATE_LIMIT_PER_MINUTE}/min")
-    print(f"  Listening on {HOST}:{PORT}")
+    log.info(f"zhchat WebSocket Server starting...")
+    log.info(f"  DB: {DB_PATH}")
+    log.info("  Auth Token: *** (已隐藏)")
+    log.info(f"  Retention: {MESSAGE_RETENTION_DAYS} days")
+    log.info(f"  Rate limit: {RATE_LIMIT_PER_MINUTE}/min")
+    log.info(f"  Listening on {HOST}:{PORT}")
 
     async with websockets.serve(handler, HOST, PORT,
                                  ping_interval=30, ping_timeout=60,

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily zhcrypt prekey expired cleanup
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+Unit=zhprekey-cleanup.service
+
+[Install]
+WantedBy=timers.target

@@ -9,9 +9,15 @@ import sys, os, time, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import set_prekey_server
-# H6: 从环境变量读取服务器配置，避免硬编码
+# H6: 全部从环境变量读取, 避免硬编码凭证 (本仓库公开, 严禁提交真实 token/密码)
 SERVER_URL = os.environ.get("ZHCHAT_TEST_SERVER", "https://iweistoicqc5.top")
-AUTH_TOKEN = os.environ.get("ZHCHAT_TEST_TOKEN", "[REDACTED_TOKEN]")
+AUTH_TOKEN = os.environ.get("ZHCHAT_TEST_TOKEN")
+if not AUTH_TOKEN:
+    sys.exit("请通过环境变量 ZHCHAT_TEST_TOKEN 提供测试 token")
+DEFAULT_PW = os.environ.get("ZHCRYPT_TEST_DEFAULT_PW")
+BOB_PW = os.environ.get("ZHCRYPT_TEST_BOB_PW")
+if not (DEFAULT_PW and BOB_PW):
+    sys.exit("请通过环境变量 ZHCRYPT_TEST_DEFAULT_PW / ZHCRYPT_TEST_BOB_PW 提供测试密码")
 
 set_prekey_server(SERVER_URL, AUTH_TOKEN)
 
@@ -27,8 +33,8 @@ def upload(identity, pw):
     req.add_header('Content-Type', 'application/json')
     urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30)
 
-upload('default', 'zhcrypt_preshared_password_2024_07_09!')
-upload('bob', 'bob123456')
+upload('default', DEFAULT_PW)
+upload('bob', BOB_PW)
 print("  done")
 
 from chat_client import ChatClient
@@ -79,8 +85,8 @@ for r, d, f in os.walk(home):
             os.remove(os.path.join(r, fn))
 
 print("启动 default 和 bob 客户端...")
-default = ChatClient("default", "zhcrypt_preshared_password_2024_07_09!")
-bob = ChatClient("bob", "bob123456")
+default = ChatClient("default", DEFAULT_PW)
+bob = ChatClient("bob", BOB_PW)
 default.start()
 bob.start()
 time.sleep(3)
@@ -179,7 +185,7 @@ time.sleep(2)
 bob.send_chat_message("default", "msg_while_offline")
 time.sleep(1)
 
-default2 = ChatClient("default", "zhcrypt_preshared_password_2024_07_09!")
+default2 = ChatClient("default", DEFAULT_PW)
 default2.start()
 time.sleep(3)
 

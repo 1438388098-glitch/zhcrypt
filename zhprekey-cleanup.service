@@ -1,0 +1,7 @@
+[Unit]
+Description=zhcrypt prekey expired cleanup
+After=network.target zhprekey.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/zhprekey/cleanup_expired.sh

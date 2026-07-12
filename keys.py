@@ -489,35 +489,68 @@ class KeyStore:
             json.dumps(bundle, ensure_ascii=False).encode("utf-8")
         ).decode("ascii")
 
+    def peek_bundle_identity(self, encoded: str):
+        """从公钥束中读取对方身份 (用于导入时自动命名)。
+
+        仅识别 v3 格式 (zhcrypt_public_key_bundle)。旧版 / 非法内容返回 None。
+        用途: 导入时无需手填名字, 直接用束内身份即可, 避免与对方在服务器
+        注册的身份不一致导致聊天握手失败 (X3DH 用该名字去 GET /v1/prekey/{名字})。
+        """
+        import base64
+        from core import urlsafe_b64decode
+        try:
+            decoded = base64.urlsafe_b64decode(encoded.encode("ascii"))
+            bundle = json.loads(decoded.decode("utf-8"))
+            if bundle.get("type") == "zhcrypt_public_key_bundle":
+                return bundle.get("identity")
+        except Exception:
+            return None
+        return None
+
     @_validate_identity_arg
-    def import_public_key_bundle(self, encoded: str, identity: str):
-        """导入他人公钥束 (自动检测新旧格式)"""
+    def import_public_key_bundle(self, encoded: str, identity: str,
+                                 display_name: str = None):
+        """导入他人公钥束 (自动检测新旧格式)。
+
+        返回状态: "imported" (新导入) | "exists_same" (已存在且公钥相同) | "imported_legacy" (旧版)
+        display_name: 仅本地显示的备注 (不影响路由, 路由恒用 identity)
+        """
         from core import urlsafe_b64decode
         import base64
         try:
             decoded = base64.urlsafe_b64decode(encoded.encode("ascii"))
             bundle = json.loads(decoded.decode("utf-8"))
             if bundle.get("type") == "zhcrypt_public_key_bundle":
-                self._do_import_bundle(bundle, identity)
-                return
+                return self._do_import_bundle(bundle, identity, display_name)
         except Exception:
             pass
-        self.import_public_key_b64(encoded, identity)
+        self.import_public_key_b64(encoded, identity, display_name)
+        return "imported_legacy"
 
-    def _do_import_bundle(self, bundle: dict, identity: str):
-        """导入公钥束到磁盘"""
+    def _do_import_bundle(self, bundle: dict, identity: str,
+                          display_name: str = None):
+        """导入公钥束到磁盘。返回 "imported" 或 "exists_same"。"""
         from core import urlsafe_b64decode
         rsa_pub = urlsafe_b64decode(bundle["rsa_pub"].encode("ascii"))
         ed_pub = urlsafe_b64decode(bundle["ed25519_pub"].encode("ascii"))
         x_pub = urlsafe_b64decode(bundle["x25519_pub"].encode("ascii"))
 
         base = self.key_dir
+        pub_path = os.path.join(base, f"{identity}.pub")
+        if os.path.exists(pub_path):
+            # 已存在: 与待导入比对, 相同则视为已导入 (跳过, 不报错)
+            with open(pub_path, "rb") as f:
+                existing = f.read()
+            if existing == rsa_pub:
+                return "exists_same"
+            raise FileExistsError(
+                f"身份 '{identity}' 已存在且公钥不同。\n"
+                f"如需替换为新公钥, 请先在「联系人」中删除该身份再导入。")
+
         for fn, data in [(f"{identity}.pub", rsa_pub),
                          (f"{identity}.ed25519.pub", ed_pub),
                          (f"{identity}.x25519.pub", x_pub)]:
             path = os.path.join(base, fn)
-            if os.path.exists(path):
-                raise FileExistsError(f"身份 '{identity}' 已存在: {fn}")
             with open(path, "wb") as f:
                 f.write(data)
 
@@ -526,17 +559,25 @@ class KeyStore:
             "imported": datetime.datetime.utcnow().isoformat() + "Z",
             "type": "imported_public_key_bundle",
         }
+        if display_name:
+            meta["display_name"] = display_name
         with open(os.path.join(base, f"{identity}.meta"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+        return "imported"
 
     @_validate_identity_arg
-    def import_public_key_b64(self, b64_pub: str, identity: str):
+    def import_public_key_b64(self, b64_pub: str, identity: str,
+                              display_name: str = None):
         """从 Base64 导入旧版 RSA 公钥"""
         from core import urlsafe_b64decode
         pub_pem = urlsafe_b64decode(b64_pub)
         public_path = os.path.join(self.key_dir, f"{identity}.pub")
         if os.path.exists(public_path):
-            raise FileExistsError(f"身份 '{identity}' 已存在")
+            with open(public_path, "rb") as f:
+                existing = f.read()
+            if existing == pub_pem:
+                return "exists_same"
+            raise FileExistsError(f"身份 '{identity}' 已存在且公钥不同")
         with open(public_path, "wb") as f:
             f.write(pub_pem)
         meta = {
@@ -544,10 +585,78 @@ class KeyStore:
             "imported": datetime.datetime.utcnow().isoformat() + "Z",
             "type": "imported_public_key",
         }
+        if display_name:
+            meta["display_name"] = display_name
         meta_path = os.path.join(self.key_dir, f"{identity}.meta")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+        return "imported"
+
+    def get_contact_display_name(self, identity: str):
+        """读取对方公钥的本地备注 (display_name)。无则返回 None。
+
+        仅用于显示, 不影响加密路由 (路由恒用 identity)。
+        """
+        import os as _os
+        meta_path = _os.path.join(self.key_dir, f"{identity}.meta")
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            return meta.get("display_name") or None
+        except Exception:
+            return None
+
+    def set_contact_display_name(self, identity: str, display_name: str):
+        """更新对方公钥的本地备注 (display_name)。"""
+        import os as _os
+        meta_path = _os.path.join(self.key_dir, f"{identity}.meta")
+        meta = {}
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+        if display_name:
+            meta["display_name"] = display_name
+        elif "display_name" in meta:
+            del meta["display_name"]
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
         return public_path
+
+    def import_peer_static_keys(self, identity: str, idk_b64: str = None,
+                                spk_b64: str = None, signing_b64: str = None):
+        """自动导入对端静态公钥 (覆盖写, 不抛异常)。
+
+        用于『连接时自动拉取对方公钥』(Tier 1 优化): 服务器是证书固定 + token
+        双认证的, 其返回的静态公钥可信。与手动 export/import 公钥束不同, 这里
+        不消费 one-time prekey, 也不要求 RSA 公钥, 仅需 X3DH 所需的:
+          - identity_key_pub (X25519) -> <peer>.x25519.pub
+          - signed_prekey_pub (X25519) -> <peer>.spk.x25519.pub
+          - signing_public_key (Ed25519) -> <peer>.ed25519.pub
+        覆盖写而非 FileExistsError, 以便对方重新上传 prekey 后能平滑更新。
+        """
+        from core import urlsafe_b64decode
+
+        base = self.key_dir
+        mapping = []
+        if idk_b64:
+            mapping.append((f"{identity}.x25519.pub",
+                            urlsafe_b64decode(idk_b64.encode("ascii"))))
+        if spk_b64:
+            mapping.append((f"{identity}.spk.x25519.pub",
+                            urlsafe_b64decode(spk_b64.encode("ascii"))))
+        if signing_b64:
+            mapping.append((f"{identity}.ed25519.pub",
+                            urlsafe_b64decode(signing_b64.encode("ascii"))))
+        for fn, data in mapping:
+            path = os.path.join(base, fn)
+            try:
+                with open(path, "wb") as f:
+                    f.write(data)
+            except Exception:
+                # 单文件失败不应中断其它字段写入
+                pass
 
     @_validate_identity_arg
     def generate_prekey_bundle(self, identity: str, passphrase: str,

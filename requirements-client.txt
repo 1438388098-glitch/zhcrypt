@@ -1,0 +1,5 @@
+# zhcrypt 客户端依赖 (gui.py / chat_client.py)
+# 安装: pip install -r requirements-client.txt
+cryptography>=3.0
+argon2-cffi>=21.1
+websocket-client>=1.0

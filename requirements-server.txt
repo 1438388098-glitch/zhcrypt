@@ -1,0 +1,7 @@
+# zhcrypt 服务器依赖 (zhprekey.service + zhchat-ws.service)
+# 安装: pip install -r requirements-server.txt
+Flask>=2.0
+gunicorn>=20.0
+websockets>=9.0
+cryptography>=3.0
+argon2-cffi>=21.1

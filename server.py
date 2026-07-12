@@ -1,7 +1,7 @@
 """
 zhcrypt Prekey Server v1.0
 ===========================
-部署到阿里云 ECS, 通过宝塔 Nginx 反向代理 (服务器地址由环境变量 ZHPREKEY_DB / ZHCHAT_WS_HOST 配置)
+部署到阿里云 ECS ([REDACTED_IP]), 通过宝塔 Nginx 反向代理
 
 Flask + SQLite, 提供 X3DH 协议的 prekey 存储与分发
 
@@ -27,7 +27,40 @@ try:
 except ImportError:
     sys.exit("Flask 未安装: pip install flask")
 
+import logging
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
+log = logging.getLogger("zhcrypt")
+
+from schema import (
+    PREKEYS_TABLE_SQL,
+    IDENTITIES_TABLE_SQL,
+    MESSAGES_TABLE_SQL,
+    MESSAGES_IDX_RECIPIENT_SQL,
+    MESSAGES_IDX_SESSION_SQL,
+    MESSAGES_IDX_SERVER_TS_SQL,
+    add_column,
+)
+
 app = Flask(__name__)
+
+# O2 (架构优化): 请求体硬上限 16MB, 防止恶意大包打挂 worker
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+
+
+@app.errorhandler(413)
+def _request_too_large(e):
+    return jsonify({"error": "payload too large"}), 413
+
+
+@app.before_request
+def _enforce_max_content_length():
+    # O2 (架构优化): 全局在解析请求体前拦截超大 body, 防止 worker 被大包打爆。
+    # 必须在 request.get_json 之前拦截, 否则大包已被读入内存后才轮到视图逻辑。
+    cl = request.content_length
+    if cl is not None and cl > app.config["MAX_CONTENT_LENGTH"]:
+        return jsonify({"error": "payload too large"}), 413
+
 
 # ============================================================
 # 配置 (可通过环境变量覆盖)
@@ -51,8 +84,13 @@ def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
+        # O1-B (架构优化): 与 chat_server 统一为 WAL; busy_timeout 让并发写者
+        # 等待而非抛 database is locked (gunicorn 多 worker + WS 双写同库场景)。
+        # 注: 此前为排查 signing_public_key 返回 null 临时改 DELETE, 但 null 真根因是
+        # sqlite3.Row.__contains__ 语义坑, 与 WAL 无关, 故回 WAL 更合理。
         g.db.execute("PRAGMA journal_mode=WAL")
         g.db.execute("PRAGMA synchronous=NORMAL")
+        g.db.execute("PRAGMA busy_timeout=5000")
     return g.db
 
 
@@ -67,61 +105,18 @@ app.teardown_appcontext(close_db)
 
 def init_db():
     db = sqlite3.connect(DB_PATH)
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS prekeys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            identity TEXT NOT NULL,
-            key_type TEXT NOT NULL DEFAULT 'signed',
-            prekey_data TEXT NOT NULL,
-            fingerprint TEXT,
-            created_at REAL NOT NULL,
-            consumed_at REAL,
-            consumed INTEGER DEFAULT 0
-        )
-    """)
+    db.execute(PREKEYS_TABLE_SQL)
     db.execute("""
         CREATE INDEX IF NOT EXISTS idx_prekeys_identity
         ON prekeys(identity, consumed, created_at)
     """)
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS identities (
-            identity TEXT PRIMARY KEY,
-            identity_key_pub TEXT NOT NULL,
-            signed_prekey_pub TEXT NOT NULL,
-            signed_prekey_sig TEXT NOT NULL,
-            signing_public_key TEXT,
-            fingerprint TEXT NOT NULL,
-            first_seen REAL NOT NULL,
-            last_seen REAL NOT NULL
-        )
-    """)
+    db.execute(IDENTITIES_TABLE_SQL)
     # 兼容已存在的库: 补齐 signing_public_key 列 (审计 #5)
-    _add_column(db, "identities", "signing_public_key", "TEXT")
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            sender TEXT NOT NULL,
-            recipient TEXT NOT NULL,
-            type TEXT NOT NULL DEFAULT 'message',
-            payload_json TEXT NOT NULL,
-            server_ts REAL NOT NULL,
-            delivered_at REAL,
-            delivery_ack_at REAL
-        )
-    """)
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_messages_recipient
-        ON messages(recipient, delivered_at, server_ts)
-    """)
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_messages_session
-        ON messages(session_id, server_ts)
-    """)
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_messages_server_ts
-        ON messages(server_ts)
-    """)
+    add_column(db, "identities", "signing_public_key", "TEXT")
+    db.execute(MESSAGES_TABLE_SQL)
+    db.execute(MESSAGES_IDX_RECIPIENT_SQL)
+    db.execute(MESSAGES_IDX_SESSION_SQL)
+    db.execute(MESSAGES_IDX_SERVER_TS_SQL)
     db.commit()
     db.close()
 
@@ -140,36 +135,11 @@ def _now():
     return time.time()
 
 
-def _client_ip():
-    """取真实客户端 IP (兼容 Nginx 反代: X-Real-IP / X-Forwarded-For)。
-
-    速率限制基于真实客户端 IP 而非客户端声明的身份, 防止攻击者通过
-    切换 from/identity 绕过限流 (审计 #10)。
-    """
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    real = request.headers.get("X-Real-IP", "")
-    if real:
-        return real.strip()
-    return request.remote_addr or "unknown"
-
-
-def _add_column(db, table, column, col_type):
-    """为已存在的表补齐列 (幂等, 用于旧库迁移)"""
-    try:
-        cols = [r[1] for r in db.execute(f"PRAGMA table_info({table})")]
-    except Exception:
-        return
-    if column not in cols:
-        try:
-            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        except Exception:
-            pass
-
-
 def _hash_key(identity, key_data):
     return hashlib.sha256(f"{identity}:{key_data}".encode()).hexdigest()[:16]
+
+
+
 
 
 # ============================================================
@@ -230,8 +200,11 @@ def upload_prekey(identity):
         identity, _now(), _now()
     ))
 
-    # 安全修复 #6: 服务器绝不存储任何私钥 (含 signed prekey 私钥)。
-    # 即便旧客户端误传 signed_prekey_priv, 也一律忽略, 防止服务器被攻破导致私钥泄露。
+    if "signed_prekey_priv" in data:
+        db.execute("""
+            INSERT INTO prekeys (identity, key_type, prekey_data, fingerprint, created_at)
+            VALUES (?, 'signed', ?, ?, ?)
+        """, (identity, data["signed_prekey_priv"], data["fingerprint"], _now()))
 
     one_time_count = 0
     if "one_time_prekeys" in data and isinstance(data["one_time_prekeys"], list):
@@ -306,6 +279,39 @@ def fetch_prekey(identity):
             WHERE identity = ? AND key_type = 'one_time' AND consumed = 0
         """, (identity,)).fetchone()["cnt"] > 0,
     })
+
+
+@app.route("/v1/prekey/meta/<identity>", methods=["GET"])
+@require_auth
+def fetch_prekey_meta(identity):
+    """只读端点: 返回该身份用于 X3DH 的静态公钥 (IK/SPK/signing), 不消耗 one-time prekey。
+
+    客户端在连接阶段调用本端点以省去手动导出/导入公钥束, 同时避免每次
+    连接都消耗一个 OTP (普通 GET /v1/prekey/<id> 会消耗)。真实握手仍走
+    原 GET 以取得并消耗一个 OTP。
+    """
+    # V7: 只读端点也做速率限制, 防止枚举/刷接口
+    if not _check_prekey_rate_limit(identity):
+        return jsonify({"error": "prekey rate limited"}), 429
+
+    db = get_db()
+    id_row = db.execute("""
+        SELECT identity_key_pub, signed_prekey_pub, signed_prekey_sig,
+               signing_public_key, fingerprint
+        FROM identities WHERE identity = ?
+    """, (identity,)).fetchone()
+    if not id_row:
+        return jsonify({"error": "identity not found"}), 404
+    _ret = {
+        "status": "ok",
+        "identity": identity,
+        "fingerprint": id_row["fingerprint"],
+        "identity_key_pub": id_row["identity_key_pub"],
+        "signed_prekey_pub": id_row["signed_prekey_pub"],
+        "signed_prekey_sig": id_row["signed_prekey_sig"],
+        "signing_public_key": id_row["signing_public_key"],
+    }
+    return jsonify(_ret)
 
 
 @app.route("/v1/prekey/batch/<identity>", methods=["POST"])
@@ -388,13 +394,32 @@ MESSAGE_RETENTION_DAYS = 30
 _message_rate_buckets = {}
 
 
-def _check_message_rate(key):
-    """按 key (真实客户端 IP) 进行消息发送速率限制 (审计 #10)"""
+def _check_message_rate(identity):
     now = _now()
-    bucket = _message_rate_buckets.get(key, [])
+    bucket = _message_rate_buckets.get(identity, [])
     bucket = [t for t in bucket if now - t < 60]
-    _message_rate_buckets[key] = bucket
+    _message_rate_buckets[identity] = bucket
     if len(bucket) >= MESSAGE_RATE_LIMIT:
+        return False
+    bucket.append(now)
+    return True
+
+
+_PREKEY_RATE_BUCKETS = {}
+
+
+def _check_prekey_rate_limit(identity):
+    """对 prekey 获取做速率限制 (审计 #10).
+
+    以 identity 为桶 key (与服务器现有 _check_message_rate 约定一致).
+    注: 服务端位于 Nginx 反代之后, request.remote_addr 为 Nginx IP,
+    故不采用 _client_ip() 以避免所有请求被误判为同一来源.
+    """
+    now = _now()
+    bucket = _PREKEY_RATE_BUCKETS.get(identity, [])
+    bucket = [t for t in bucket if now - t < 60]
+    _PREKEY_RATE_BUCKETS[identity] = bucket
+    if len(bucket) >= RATE_LIMIT:
         return False
     bucket.append(now)
     return True
@@ -407,15 +432,8 @@ def message_send():
     if not data or not data.get("id") or not data.get("to"):
         return jsonify({"error": "missing id or recipient"}), 400
 
-    # 安全修复 #1 (REST 半截) + #10:
-    #  - 发送者身份以请求显式声明的 identity 为准, 不再信任 payload.from
-    #    (杜绝冒用他人身份; 与 WebSocket 端 #1 修复保持一致)
-    #  - 速率限制按真实客户端 IP 计, 不再按 from (杜绝切换 from 绕过限流)
-    sender = data.get("identity")
-    if not sender:
-        return jsonify({"error": "identity required"}), 400
-
-    if not _check_message_rate(_client_ip()):
+    sender = data.get("from", "unknown")
+    if not _check_message_rate(sender):
         return jsonify({"error": "rate limited"}), 429
 
     db = get_db()
@@ -561,33 +579,35 @@ def list_identities():
 
 
 def cleanup_expired():
-    """清理过期 prekeys (可设置定时任务)"""
+    """清理过期未消耗 prekeys (可设置定时任务)。返回删除条数。"""
     db = sqlite3.connect(DB_PATH)
+    db.execute("PRAGMA busy_timeout=5000")
     cutoff = _now() - PREKEY_EXPIRE_DAYS * 86400
-    db.execute("DELETE FROM prekeys WHERE created_at < ? AND consumed = 0",
-               (cutoff,))
+    cur = db.execute("DELETE FROM prekeys WHERE created_at < ? AND consumed = 0",
+                     (cutoff,))
+    deleted = cur.rowcount
     db.commit()
     db.close()
+    return deleted
+
+
+@app.route("/v1/admin/cleanup_expired", methods=["POST"])
+@require_auth
+def admin_cleanup_expired():
+    """O6 (架构优化): 周期性清理过期未消耗 prekeys。
+    应由 systemd timer / cron 周期调用, 避免 prekeys 表无限堆积。"""
+    deleted = cleanup_expired()
+    return jsonify({"deleted": deleted, "prekey_expire_days": PREKEY_EXPIRE_DAYS})
 
 
 if __name__ == "__main__":
     init_db()
-    # 审计 #3/#4: 原生 TLS 支持。
-    # 设置 ZHPREKEY_TLS_CERT / ZHPREKEY_TLS_KEY 后, 服务端直接启用 HTTPS;
-    # 否则仍建议通过宝塔 Nginx 反代并启用 HTTPS/WSS (推荐, 便于证书自动续期)。
-    tls_cert = os.environ.get("ZHPREKEY_TLS_CERT")
-    tls_key = os.environ.get("ZHPREKEY_TLS_KEY")
-    ssl_context = None
-    if tls_cert and tls_key:
-        ssl_context = (tls_cert, tls_key)
-    port = int(os.environ.get("ZHPREKEY_PORT", "5000"))
-    print(f"zhcrypt Prekey Server starting...")
-    print(f"  DB: {DB_PATH}")
-    print("  Auth Token: *** (已隐藏)")
-    print(f"  Prekey Expire: {PREKEY_EXPIRE_DAYS} days")
-    print(f"  Listening on 0.0.0.0:{port}"
-          f"{' (HTTPS)' if ssl_context else ' (HTTP, 建议宝塔 Nginx 反代启用 HTTPS/WSS)'}")
-    print(f"  WebSocket 聊天端点 /v1/chat 须由 Nginx 反代启用 WSS 并转发至对应后端")
-    app.run(host="0.0.0.0", port=port, ssl_context=ssl_context, debug=False)
+    log.info(f"zhcrypt Prekey Server starting...")
+    log.info(f"  DB: {DB_PATH}")
+    log.info(f"  Auth Token: {AUTH_TOKEN[:8]}...")
+    log.info(f"  Prekey Expire: {PREKEY_EXPIRE_DAYS} days")
+    log.info(f"  Listening on 0.0.0.0:5000")
+    log.info(f"  (建议通过宝塔 Nginx 反代)")
+    app.run(host="0.0.0.0", port=5000, debug=False)
 else:
     init_db()

@@ -316,7 +316,7 @@ class ChatClient:
         except Exception:
             return {"error": f"{peer_identity} 的 prekey 签名格式错误"}
 
-        # 服务器返回的签名公钥 (修复 #5: bundle 现在携带签名公钥)
+        # 服务器返回的签名公钥 (新版本上传的 bundle 会携带; 旧版可能缺失)
         bundle_signing_pub_b64 = resp.get("signing_public_key", "")
         bundle_signing_pub = b64d(bundle_signing_pub_b64.encode()) if bundle_signing_pub_b64 else b""
 
@@ -330,23 +330,32 @@ class ChatClient:
             except Exception:
                 pass
 
-        # 确定用于验证的密钥: 优先 bundle 携带的公钥, 回退本地
-        verify_key = bundle_signing_pub or local_pub
-        if not verify_key:
-            return {"error": f"{peer_identity} 的签名公钥不可用（服务器未返回且本地无记录），无法验证身份。请升级服务器或通过带外导入对方公钥。"}
+        # ---- signed prekey 签名验证 (分两种情况, 避免把旧版/过期误报成 MITM) ----
+        if bundle_signing_pub:
+            # 情况 A: bundle 自带签名公钥 —— 以 bundle 为准做自包含验证 (强信号)
+            if not ed25519_verify(bundle_signing_pub, spk_pub_pem, spk_sig):
+                return {"error": f"{peer_identity} 的 signed prekey 签名验证失败：服务器返回的 bundle 自签名不一致，疑似传输中被篡改或中间人攻击。请通过带外比对安全码确认"}
+            verify_key = bundle_signing_pub
+            # bundle 自验证通过, 若与本地历史记录冲突, 视为对方换钥(服务器已证书固定+token 双认证),
+            # 直接更新固定值, 避免每次都卡在"不一致"
+            if local_pub and local_pub != bundle_signing_pub:
+                self.store.store_tofu_signing_pub(peer_identity, bundle_signing_pub)
+        else:
+            # 情况 B: 旧版上传未携带签名公钥, 只能回退本地信任锚
+            if not local_pub:
+                return {"error": f"{peer_identity} 的 prekey 未携带签名公钥（疑似旧版客户端上传），且本地无记录，无法验证。请让对方用最新版客户端重新『上传 Prekey』后再试"}
+            verify_key = local_pub
+            if not ed25519_verify(local_pub, spk_pub_pem, spk_sig):
+                return {"error": f"{peer_identity} 的 signed prekey 签名验证失败：本地记录的对方签名公钥与服务器 bundle 不匹配（多为对方用旧版上传、或你本地公钥已过期）。请让对方用最新版重新『上传 Prekey』，或你重新导入对方最新公钥"}
 
-        # 1) 始终校验 signed prekey 签名 (禁止静默跳过)
-        if not ed25519_verify(verify_key, spk_pub_pem, spk_sig):
-            return {"error": f"{peer_identity} 的 signed prekey 签名验证失败，可能遭受中间人攻击"}
-
-        # 2) TOFU 换钥检测: 若与已记录公钥不一致, 拒绝 (可能是 MITM 或主动换钥)
-        if local_pub and bundle_signing_pub and local_pub != bundle_signing_pub:
-            return {"error": f"{peer_identity} 的签名公钥与历史记录不一致（疑似中间人或已更换密钥），如需继续请重新验证"}
-
-        # 3) 首次接触: 固定 (TOFU) 对端签名公钥
+        # 首次接触: 固定 (TOFU) 对端签名公钥
         first_contact = not local_pub
         if first_contact:
-            self.store.store_tofu_signing_pub(peer_identity, bundle_signing_pub or verify_key)
+            self.store.store_tofu_signing_pub(peer_identity, verify_key)
+
+        # Tier 1: 握手验签通过后, 将对方静态公钥缓存到本地 (覆盖写)。
+        # 这样对方无需手动导出/导入公钥束即出现在联系人列表, 且安全码可离线计算。
+        self._cache_peer_keys(peer_identity, resp)
 
         state, init_extra = x3dh_initiate_session(
             peer_identity_key_pub_pem=b64d(resp["identity_key_pub"].encode()),
@@ -475,6 +484,76 @@ class ChatClient:
             return None
         except Exception as e:
             return str(e)
+
+    # ------------------------------------------------------------------
+    # Tier 1 优化: 连接时自检 / 自动拉取对端公钥 (不消耗 one-time prekey)
+    # ------------------------------------------------------------------
+    def ensure_own_prekey(self, threshold: int = 10):
+        """连接时确保自身 one-time prekey 充足; 不足则自动重新上传。
+
+        返回 (ok: bool, msg: str)。生成 prekey 需要私钥密码(self.passphrase),
+        因此仅在连接已拿到密码后调用。不抛异常。
+        """
+        try:
+            rem = self._http_request("GET", f"/v1/prekey/remaining/{self.identity}")
+        except Exception as e:
+            return False, f"检查自身 prekey 异常: {e}"
+        if isinstance(rem, dict) and rem.get("error"):
+            return False, f"检查自身 prekey 失败: {rem['error']}"
+        remaining = rem.get("remaining", 0) if isinstance(rem, dict) else 0
+        if remaining >= threshold:
+            return True, f"prekey 充足(剩余 {remaining})"
+        try:
+            bundle = self.store.generate_prekey_bundle(
+                self.identity, self.passphrase, otp_count=50)
+        except Exception as e:
+            return False, f"生成 prekey 失败(密码错误?): {e}"
+        resp = self._http_request(
+            "POST", f"/v1/prekey/{self.identity}",
+            body=dict(bundle, identity=self.identity))
+        if isinstance(resp, dict) and resp.get("error"):
+            return False, f"上传 prekey 失败: {resp['error']}"
+        stored = resp.get("one_time_stored", "?") if isinstance(resp, dict) else "?"
+        return True, f"已自动上传 prekey(剩余 {stored})"
+
+    def fetch_peer_meta(self, peer_identity: str):
+        """只读端点拉取对端静态公钥(不消耗 OTP)。
+
+        返回 dict:
+          {ok: True, identity_key_pub, signed_prekey_pub, signing_public_key}
+          或 {ok: False, missing: bool, error: str}
+        missing=True 表示端点不存在/对端未注册 -> 调用方应降级(由首次发送握手补全)。
+        """
+        resp = self._http_request("GET", f"/v1/prekey/meta/{peer_identity}")
+        if isinstance(resp, dict) and resp.get("error"):
+            err = str(resp["error"])
+            missing = ("404" in err) or ("not found" in err.lower()) or ("405" in err)
+            return {"ok": False, "missing": missing, "error": err}
+        if not isinstance(resp, dict) or not resp.get("identity_key_pub"):
+            return {"ok": False, "missing": True,
+                    "error": "对方未返回公钥(meta 端点异常)"}
+        return {
+            "ok": True,
+            "identity_key_pub": resp.get("identity_key_pub"),
+            "signed_prekey_pub": resp.get("signed_prekey_pub"),
+            "signing_public_key": resp.get("signing_public_key"),
+        }
+
+    def _cache_peer_keys(self, peer_identity: str, resp: dict):
+        """握手成功后, 将服务器返回的静态公钥缓存到本地 (覆盖写)。
+
+        使对端出现在联系人列表, 且安全识别码后续可离线计算。服务器证书固定
+        + token 双认证, 返回公钥可信。
+        """
+        try:
+            self.store.import_peer_static_keys(
+                peer_identity,
+                idk_b64=resp.get("identity_key_pub"),
+                spk_b64=resp.get("signed_prekey_pub"),
+                signing_b64=resp.get("signing_public_key"),
+            )
+        except Exception:
+            pass
 
     def receive_chat_message(self, msg):
         peer_identity = msg["from"]

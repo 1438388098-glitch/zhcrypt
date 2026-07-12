@@ -1,0 +1,82 @@
+"""zhcrypt 共享数据库 schema 定义 (O9)。
+集中所有 CREATE TABLE / CREATE INDEX DDL 与 add_column 迁移 helper,
+修改表结构只动此处。"""
+from sqlite3 import Connection
+
+
+PREKEYS_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS prekeys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        identity TEXT NOT NULL,
+        key_type TEXT NOT NULL DEFAULT 'signed',
+        prekey_data TEXT NOT NULL,
+        fingerprint TEXT,
+        created_at REAL NOT NULL,
+        consumed_at REAL,
+        consumed INTEGER DEFAULT 0
+    )
+"""
+
+IDENTITIES_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS identities (
+        identity TEXT PRIMARY KEY,
+        identity_key_pub TEXT NOT NULL,
+        signed_prekey_pub TEXT NOT NULL,
+        signed_prekey_sig TEXT NOT NULL,
+        signing_public_key TEXT,
+        fingerprint TEXT NOT NULL,
+        first_seen REAL NOT NULL,
+        last_seen REAL NOT NULL
+    )
+"""
+
+MESSAGES_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'message',
+        payload_json TEXT NOT NULL,
+        server_ts REAL NOT NULL,
+        delivered_at REAL,
+        delivery_ack_at REAL
+    )
+"""
+
+MESSAGES_IDX_RECIPIENT_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_messages_recipient
+    ON messages(recipient, delivered_at, server_ts)
+"""
+
+MESSAGES_IDX_SESSION_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_messages_session
+    ON messages(session_id, server_ts)
+"""
+
+MESSAGES_IDX_SERVER_TS_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_messages_server_ts
+    ON messages(server_ts)
+"""
+
+FILES_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS files (
+        token TEXT PRIMARY KEY,
+        uploader TEXT NOT NULL,
+        intended_recipient TEXT,
+        server_ts REAL NOT NULL
+    )
+"""
+
+
+def add_column(db, table, column, col_type):
+    """为已存在的表补齐列 (幂等, 用于旧库迁移)"""
+    try:
+        cols = [r[1] for r in db.execute("PRAGMA table_info({})".format(table))]
+    except Exception:
+        return
+    if column not in cols:
+        try:
+            db.execute("ALTER TABLE {} ADD COLUMN {} {}".format(table, column, col_type))
+        except Exception:
+            pass
