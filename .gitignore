@@ -29,3 +29,6 @@ zhcrypt_local_defaults.jsonc
 
 # 调试 / 临时脚本残留 (以 _ 前缀)
 _*.py
+
+# 编码乱码残留文件
+绯荤粲
