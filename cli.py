@@ -952,97 +952,14 @@ def cmd_shell(args=None):
             _exec_shell_command(cmd, rest)
 
 def _exec_shell_command(cmd, args_list):
-    """在 shell 中执行一个命令"""
-    dispatch = {
-        "init": lambda a: _run_compat("init", a),
-        "list": lambda a: _run_compat("list", a),
-        "info": lambda a: _run_compat("info", a),
-        "encrypt": lambda a: _run_compat("encrypt", a),
-        "decrypt": lambda a: _run_compat("decrypt", a),
-        "encrypt-file": lambda a: _run_compat("encrypt-file", a),
-        "decrypt-file": lambda a: _run_compat("decrypt-file", a),
-        "export": lambda a: _run_compat("export", a),
-        "import": lambda a: _run_compat("import", a),
-        "export-bundle": lambda a: _run_compat("export-bundle", a),
-        "import-bundle": lambda a: _run_compat("import-bundle", a),
-        "delete": lambda a: _run_compat("delete", a),
-        "set-server": lambda a: _run_compat("set-server", a),
-        "upload-prekey": lambda a: _run_compat("upload-prekey", a),
-        "encrypt-signed": lambda a: _run_compat("encrypt-signed", a),
-        "backup": lambda a: _run_compat("backup", a),
-        "restore": lambda a: _run_compat("restore", a),
-        "strength": lambda a: _run_compat("strength", a),
-        "set-params": lambda a: _run_compat("set-params", a),
-        "chat-send": lambda a: _run_compat("chat-send", a),
-        "chat-poll": lambda a: _run_compat("chat-poll", a),
-        "chat-history": lambda a: _run_compat("chat-history", a),
-        "chat-status": lambda a: _run_compat("chat-status", a),
-        "chat-delete": lambda a: _run_compat("chat-delete", a),
-        "chat-safety": lambda a: _run_compat("chat-safety", a),
-        "cert-pin": lambda a: _run_compat("cert-pin", a),
-        "install-path": lambda a: cmd_install_path(argparse.Namespace()),
-    }
-    fn = dispatch.get(cmd)
-    if fn:
-        fn(args_list)
-    else:
-        _err(f"未知命令: {cmd}  (输入 help 查看可用命令)")
-
-def _run_compat(command_name, args_list):
-    """将 shell 命令参数映射到 argparse 并执行"""
-    parser = argparse.ArgumentParser(prog=command_name, add_help=False)
-    if command_name in ("encrypt", "decrypt", "encrypt-signed", "chat-send", "chat-history", "chat-safety", "chat-delete"):
-        parser.add_argument("text", nargs="*", default=None)
-        parser.add_argument("-o", "--output", default=None)
-        parser.add_argument("-t", "--to", "--peer", default=None, dest="to")
-        parser.add_argument("-s", "--sender", default=None)
-        parser.add_argument("--sign", action="store_true", default=False)
-        parser.add_argument("--temp-share", action="store_true", default=False)
-        parser.add_argument("-i", "--identity", default=None)
-        parser.add_argument("-n", "--limit", type=int, default=50)
-        parser.add_argument("--count", type=int, default=50)
-        parser.add_argument("--dry-run", action="store_true")
-        parser.add_argument("--overwrite", action="store_true")
-        parser.add_argument("--legacy", action="store_true")
-        parser.add_argument("--token", default="")
-        parser.add_argument("--pin", default=None)
-    else:
-        parser.add_argument("arg", nargs="*", default=None)
-        parser.add_argument("-c", "--comment", default="")
-        parser.add_argument("--count", type=int, default=50)
-        parser.add_argument("--dry-run", action="store_true")
-        parser.add_argument("--overwrite", action="store_true")
-        parser.add_argument("--legacy", action="store_true")
-        parser.add_argument("--token", default="")
-        parser.add_argument("--pin", default=None)
-        parser.add_argument("--time", type=int, default=None)
-        parser.add_argument("--mem", type=int, default=None)
-        parser.add_argument("--par", type=int, default=None)
-        parser.add_argument("--password", default=None)
-
+    """在 shell 中执行一个命令（子进程复用完整 argparse）"""
     try:
-        parsed = parser.parse_args(args_list)
-    except SystemExit:
-        return
-
-    names_map = {
-        "init": cmd_init, "list": cmd_list, "info": cmd_info,
-        "encrypt": cmd_encrypt, "decrypt": cmd_decrypt,
-        "encrypt-file": cmd_encrypt_file, "decrypt-file": cmd_decrypt_file,
-        "export": cmd_export, "import": cmd_import,
-        "export-bundle": cmd_export_bundle, "import-bundle": cmd_import_bundle,
-        "delete": cmd_delete, "set-server": cmd_set_server,
-        "upload-prekey": cmd_upload_prekey, "encrypt-signed": cmd_encrypt_signed,
-        "backup": cmd_backup, "restore": cmd_restore,
-        "strength": cmd_strength, "set-params": cmd_set_params,
-        "chat-send": cmd_chat_send, "chat-poll": cmd_chat_poll,
-        "chat-history": cmd_chat_history, "chat-status": cmd_chat_status,
-        "chat-delete": cmd_chat_delete, "chat-safety": cmd_chat_safety,
-        "cert-pin": cmd_cert_pin,
-    }
-    fn = names_map.get(command_name)
-    if fn:
-        fn(parsed)
+        script = os.path.abspath(__file__)
+        cmdline = [sys.executable, script, cmd] + args_list
+        import subprocess
+        subprocess.run(cmdline)
+    except Exception as e:
+        _err(f"执行失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════

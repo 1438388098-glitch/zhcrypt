@@ -1,78 +1,71 @@
-param(
-    [string]$Dir = "$Home\Desktop\zhcrypt",
-    [switch]$NoShortcut
-)
+param([string]$Dir = "$Home\Desktop\zhcrypt", [switch]$NoShortcut)
 
 $ErrorActionPreference = "Stop"
-$OldEncoding = [Console]::OutputEncoding
-[Console]::OutputEncoding = [Text.Encoding]::UTF8
 
-Write-Host "╔══════════════════════════════════════════╗" -Foreground Cyan
-Write-Host "║     zhcrypt 一键安装                     ║" -Foreground Cyan
-Write-Host "╚══════════════════════════════════════════╝" -Foreground Cyan
-Write-Host ""
+function title($t) { Write-Host "==> $t" -Foreground Cyan }
+function step($s) { Write-Host "  -> $s" -Foreground Yellow }
+function ok($s) { Write-Host "  [OK] $s" -Foreground Green }
+function fail($s) { Write-Host "  [FAIL] $s" -Foreground Red; exit 1 }
 
-# ── 1. 克隆 ──
+title "zhcrypt One-Click Setup"
+
+# 1. clone
+step "Cloning repository..."
 if (-not (Test-Path "$Dir\cli.py")) {
-    Write-Host "▸ 克隆仓库..." -Foreground Yellow
     if (Test-Path $Dir) { Remove-Item -Recurse -Force $Dir }
-    git clone https://github.com/1438388098-glitch/zhcrypt.git $Dir
+    git clone https://github.com/1438388098-glitch/zhcrypt.git $Dir 2>$null
+    if (-not (Test-Path "$Dir\cli.py")) { fail "git clone failed - is git installed?" }
+    ok "repository cloned to $Dir"
 } else {
-    Write-Host "▸ 仓库已存在，跳过克隆" -Foreground Green
+    ok "repository already exists"
 }
 
 Set-Location $Dir
 
-# ── 2. 依赖 ──
-Write-Host "▸ 安装依赖..." -Foreground Yellow
-pip install -r requirements.txt -q
-pip install websocket-client -q
-Write-Host "  ✓ 依赖安装完成" -Foreground Green
+# 2. deps
+step "Installing dependencies..."
+if (!(Get-Command pip -ErrorAction SilentlyContinue)) { fail "pip not found - install Python first" }
+pip install -r requirements.txt -q 2>$null
+pip install websocket-client -q 2>$null
+ok "dependencies installed"
 
-# ── 3. 添加到 PATH ──
-Write-Host "▸ 添加到 PATH..." -Foreground Yellow
+# 3. PATH
+step "Adding to PATH (restart terminal after)..."
 $current = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($current -split ";" -notcontains $Dir) {
     [Environment]::SetEnvironmentVariable("Path", "$current;$Dir", "User")
-    Write-Host "  ✓ 已添加到 PATH（重启终端生效）" -Foreground Green
+    ok "added to PATH"
 } else {
-    Write-Host "  ✓ 已在 PATH 中" -Foreground Green
+    ok "already in PATH"
 }
 
-# ── 4. 桌面快捷方式 ──
+# 4. desktop shortcuts
 if (-not $NoShortcut) {
-    Write-Host "▸ 创建桌面快捷方式..." -Foreground Yellow
-    $batPath = "$Dir\zhcrypt.bat"
-    
-    # GUI 快捷方式
-    $ws = New-Object -ComObject WScript.Shell
-    $shortcutPath = "$Home\Desktop\zhcrypt-GUI.lnk"
-    $s = $ws.CreateShortcut($shortcutPath)
-    $s.TargetPath = $batPath
-    $s.Arguments = "gui"
-    $s.WorkingDirectory = $Dir
-    $s.Description = "zhcrypt 中文加密系统 - GUI"
-    $s.Save()
-    Write-Host "  ✓ 桌面快捷方式已创建: $shortcutPath" -Foreground Green
-    
-    # CLI 快捷方式（指向交互式终端，方便右键「以交互式终端打开」）
-    $cliShortcut = "$Home\Desktop\zhcrypt-CLI.lnk"
-    $s2 = $ws.CreateShortcut($cliShortcut)
-    $s2.TargetPath = "powershell.exe"
-    $s2.Arguments = "-NoExit -Command Set-Location '$Dir'; python cli.py"
-    $s2.WorkingDirectory = $Dir
-    $s2.Description = "zhcrypt 中文加密系统 - CLI 交互式终端"
-    $s2.Save()
-    Write-Host "  ✓ CLI 快捷方式已创建: $cliShortcut" -Foreground Green
+    step "Creating desktop shortcuts..."
+    try {
+        $ws = New-Object -ComObject WScript.Shell
+        $bat = "$Dir\zhcrypt.bat"
+        $gui = $ws.CreateShortcut("$Home\Desktop\zhcrypt-GUI.lnk")
+        $gui.TargetPath = $bat
+        $gui.Arguments = "gui"
+        $gui.WorkingDirectory = $Dir
+        $gui.Description = "zhcrypt GUI - double-click to launch"
+        $gui.Save()
+        ok "desktop: zhcrypt-GUI"
+        $cli = $ws.CreateShortcut("$Home\Desktop\zhcrypt-CLI.lnk")
+        $cli.TargetPath = "powershell.exe"
+        $cli.Arguments = "-NoExit -Command Set-Location '$Dir'; python cli.py"
+        $cli.WorkingDirectory = $Dir
+        $cli.Description = "zhcrypt CLI - interactive terminal"
+        $cli.Save()
+        ok "desktop: zhcrypt-CLI"
+    } catch {
+        fail "shortcut creation failed: $_"
+    }
 }
 
+title "Done!"
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════╗" -Foreground Cyan
-Write-Host "║  安装完成！                               ║" -Foreground Cyan
-Write-Host "║                                          ║" -Foreground Cyan
-Write-Host "║  双击桌面 zhcrypt-GUI 启动图形界面         ║" -Foreground Cyan
-Write-Host "║  双击桌面 zhcrypt-CLI 启动交互式终端       ║" -Foreground Cyan
-Write-Host "║  或重启终端后直接输入: zhcrypt             ║" -Foreground Cyan
-Write-Host "╚══════════════════════════════════════════╝" -Foreground Cyan
-
-[Console]::OutputEncoding = $OldEncoding
+Write-Host "  zhcrypt-GUI   -> double-click to launch GUI" -Foreground Green
+Write-Host "  zhcrypt-CLI   -> double-click to launch interactive shell" -Foreground Green
+Write-Host "  zhcrypt       -> type in any terminal (after restart)" -Foreground Green
