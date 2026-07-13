@@ -238,7 +238,7 @@ PFS 通过 **X3DH 密钥交换协议** 实现：
 PFS 需要一个 **prekey 服务器** 来托管临时公钥（已部署在阿里云）：
 
 ```batch
-zhcrypt set-server https://iweistoicqc5.top/prekey --token <你的token>
+zhcrypt set-server https://YOUR_SERVER/prekey --token <你的token>
 zhcrypt upload-prekey default --count 50
 ```
 
@@ -384,13 +384,13 @@ zhcrypt decrypt <密文>
 ```batch
 # === Alice ===
 zhcrypt init alice
-zhcrypt set-server https://iweistoicqc5.top/prekey --token <token>
+zhcrypt set-server https://YOUR_SERVER/prekey --token <token>
 zhcrypt upload-prekey alice --count 50
 zhcrypt export-bundle    # 发给 Bob
 
 # === Bob ===
 zhcrypt init bob
-zhcrypt set-server https://iweistoicqc5.top/prekey --token <token>
+zhcrypt set-server https://YOUR_SERVER/prekey --token <token>
 zhcrypt upload-prekey bob --count 50
 zhcrypt export-bundle    # 发给 Alice
 
@@ -439,11 +439,11 @@ zhcrypt import-bundle <束> bob # 导入
 
 ### Prekey 服务器部署
 
-prekey 服务器部署在阿里云 ECS (`[REDACTED_IP]`)，通过 Nginx 反代提供服务：
+prekey 服务器部署在阿里云 ECS，通过 Nginx 反代提供服务：
 
 ```
-https://iweistoicqc5.top/prekey/v1/health  → 健康检查
-https://iweistoicqc5.top/prekey/v1/prekey/<identity>  → prekey 存储/获取
+https://YOUR_SERVER/prekey/v1/health  → 健康检查
+https://YOUR_SERVER/prekey/v1/prekey/<identity>  → prekey 存储/获取
 ```
 
 ---
@@ -537,7 +537,7 @@ A: v3.0 自动识别并解密 v2.0 的密文。
 A: `python -c "import tkinter"` 测试 Tkinter 是否安装。
 
 **Q: prekey 服务器需要自己搭吗？**
-A: 已部署在阿里云 `iweistoicqc5.top/prekey`，直接配置即可。
+A: 已部署在阿里云，直接配置即可。
 
 **Q: 前向安全 vs 普通模式性能差异？**
 A: PFS 每次额外 2 次 X25519 ECDH（~微秒级），无感知。

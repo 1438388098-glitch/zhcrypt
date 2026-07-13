@@ -16,7 +16,7 @@
 | **#5** | X3DH 首次通信跳过 signed prekey 签名验证（TOFU 未落地），MITM 可冒充身份完成握手 | ① `generate_prekey_bundle` 在 bundle 中携带 Ed25519 签名公钥（公钥无密）；② `server.py` 的 `identities` 表新增 `signing_public_key` 列并随 `fetch_prekey` 返回；③ `chat_client._initiate_session` **始终校验** SPK 签名（不再静默跳过），首次接触将签名公钥固定为 TOFU，再次接触若公钥变化则拒绝（换钥/MITM 检测）；④ 响应方 `_handle_x3dh_init` 同样固定并检测对端签名公钥；⑤ 新增 `compute_safety_number` 供带外比对 | `test_security_fixes.py` #5：bundle 自验通过；首次握手固定 TOFU；SPK 签名被篡改拒绝；签名公钥突变(MITM)拒绝 |
 | **#7** | 文件下载仅允许上传者本人，接收方拿不到自己收到的文件 | ① `chat_server.py` 的 `files` 表新增 `intended_recipient` 列；② 上传时记录预期接收方（GUI 已带上 `_chat_peer`）；③ 下载授权改为 `上传者 OR 预期接收方`（`can_download_file`）；④ 抽出 `record_file_upload`/`can_download_file` 便于测试 | `test_security_fixes.py` #7：上传者/接收方可下载、第三方不可、无接收方仅上传者可、不存在 token 拒绝 |
 | **#10** | 消息速率限制按 `from` 计，攻击者切换 `from` 可无限发消息（消息轰炸/DB 膨胀） | 限流键改为真实客户端 IP（随 #1 REST 修复一并落地）；同时 `from` 不再决定发送者身份 | 随 #1-REST 一并覆盖测试（限流 429 + 上限拒绝） |
-| **#13** | 源码注释/帮助文本硬编码公网 IP `[REDACTED_IP]`（`server.py:4`、`cli.py:846`），源码泄露即暴露服务器地址，可直连绕过 WAF | 删除 IP：`server.py` 注释改为"服务器地址由环境变量配置"，`cli.py` 帮助示例改为域名 | `test_security_fixes.py` #13：扫描全部自研 `.py` 不再含该 IP |
+| **#13** | 源码注释/帮助文本硬编码公网 IP，源码泄露即暴露服务器地址 | 删除 IP，改为占位符 | `test_security_fixes.py` #13：扫描全部自研 `.py` 不再含真实 IP |
 | **#14** | 启动日志打印 token 前 8 位 | `server.py` / `chat_server.py` 启动日志改为 `Auth Token: *** (已隐藏)` | `test_security_fixes.py` #14：源码扫描无 `AUTH_TOKEN[` 前缀打印，两服务器均打印 `***` |
 | **#19** | WebSocket `handler(websocket, path)` 第二参数 `path` 在新版 `websockets`(11.0+) 已被移除，升级库后服务器无法启动 | 改为 `async def handler(websocket, path=None):`（`path` 未使用），同时兼容新旧两版库 | `test_security_fixes.py` #19：inspect 校验 handler 可仅以单参数(websocket) 调用 |
 | **#20（审计外发现）** | 文件下载 `file_path = os.path.join(FILE_DIR, token)` 直接拼客户端传入的 `token`，含 `../` 可读 FILE_DIR 之外的任意文件（路径穿越, CWE-22） | 新增 `_resolve_file_path()`：仅允许 32 位十六进制 token（同 `secrets.token_hex(16)` 格式），且真实路径必须仍在 FILE_DIR 内；`file_download` 改用该函数 | `test_security_fixes.py` #1-WS 集成：路径穿越 token 与非法格式 token 均返回 404 |
@@ -57,7 +57,7 @@ test_security_fixes.py 66/66  PASS  (EXIT=0)
 ## 运行方式
 
 ```bash
-cd c:\Users\20579\zhcrypt
+cd zhcrypt
 python test_all.py              # 原有综合测试
 python test_x3dh_full.py        # 原有 X3DH 回归
 python test_security_fixes.py   # 本次新增：安全修复回归

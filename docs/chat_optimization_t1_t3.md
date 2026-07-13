@@ -168,7 +168,7 @@
 **意图**：新用户第一次打开即走完所有前置，不用看那份 5 步说明。
 
 - 首次运行（检测 `~/.zhcrypt/config.json` 无 `default_identity` 或 identities 为空）自动弹出向导：
-  1. 服务器地址（预填 `https://iweistoicqc5.top`，可改）
+   1. 服务器地址（预填默认服务器，可改）
   2. 创建/选择身份 + 密码（自动 `ensure_kem_keys` + 自动传 prekey，复用 T1-1）
   3. 输入对方 ID（自动拉公钥，复用 T1-2）
   4. 自动握手 + 弹窗显示安全识别码并提示带外核对

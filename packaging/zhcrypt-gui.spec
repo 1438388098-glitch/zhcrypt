@@ -1,11 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+import os
+BASE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(BASE)
 
 block_cipher = None
 
-
-a = Analysis(['C:\\Users\\20579\\zhcrypt\\gui.py'],
-             pathex=['C:\\Users\\20579\\zhcrypt\\lib', 'C:\\Users\\20579\\zhcrypt'],
+a = Analysis([os.path.join(ROOT, 'gui.py')],
+             pathex=[os.path.join(ROOT, 'lib'), ROOT],
              binaries=[],
              datas=[],
              hiddenimports=[],

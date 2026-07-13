@@ -3,7 +3,7 @@
 - **文档版本**：v1.0
 - **日期**：2026-07-12
 - **作者视角**：高级开发工程师（架构评审）
-- **适用范围**：`zhcrypt` 端到端加密聊天系统（本地 `C:\Users\20579\zhcrypt` + 生产 `iweistoicqc5.top`）
+- **适用范围**：`zhcrypt` 端到端加密聊天系统（本地项目目录 + 生产服务器）
 - **目标**：在不破坏现有 X3DH / 双棘轮 / 文件 E2E 加密的前提下，消除稳定性与工程化短板
 - **实施状态（2026-07-12）**：✅ **Phase 1 已完成并部署验证** — O2（请求体 16MB 上限 + 全局 `before_request` 拦截，实测 20MB 包返回 413）、O1-B（两服务统一 WAL + `busy_timeout=5000` + `_connect()` 封装）。两服务 `active`，health/meta 正常。
 - **Phase 2 第一批（同日）**：✅ **O3**（拆分 `requirements-server.txt`/`requirements-client.txt`，`requirements.txt` 升级为带说明的全量聚合，已同步生产）；✅ **O6**（新增 `POST /v1/admin/cleanup_expired` 受保护端点 + `cleanup_expired()` 返回删除数 + systemd `zhprekey-cleanup.timer` 每日 03:17 触发，已 `enable` 并手动验证返回 `{"deleted":0}`）。
@@ -18,7 +18,7 @@
 
 ```
                          ┌──────────────────────────────────────────┐
-   客户端 (gui.py / cli) │           阿里云 ECS  iweistoicqc5.top      │
+   客户端 (gui.py / cli) │           阿里云 ECS  (生产服务器)          │
    ──────────────────────┼──────────────────────────────────────────┤
    ① Prekey 管理         │  Nginx 反代                                │
       REST /v1/prekey/*  │   ├─ 127.0.0.1:5002  Flask (zhprekey.service)│

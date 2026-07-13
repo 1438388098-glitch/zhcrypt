@@ -1,14 +1,13 @@
 # zhcrypt Prekey 服务器部署指南
 
-## 部署到阿里云 ECS ([REDACTED_IP])
+## 部署到阿里云 ECS
 
 服务器配置参考 INSTRUCTIONS.md 中的记录。
 
 ### 1. SSH 登录
 
 ```bash
-ssh root@[REDACTED_IP]
-# 密码请参考宝塔面板或 INSTRUCTIONS.md
+ssh root@YOUR_SERVER_IP
 ```
 
 ### 2. 安装依赖
@@ -35,7 +34,7 @@ export ZHPREKEY_EXPIRE_DAYS=7
 
 # 测试运行
 python server.py
-# 访问 http://[REDACTED_IP]:5000/v1/health 确认返回 JSON
+# 访问 http://YOUR_SERVER_IP:5000/v1/health 确认返回 JSON
 ```
 
 ### 4. 通过宝塔面板配置 Nginx 反代
@@ -43,7 +42,7 @@ python server.py
 **宝塔面板 → 网站 → 添加站点** 或 **反向代理**：
 
 - 目标 URL: `http://127.0.0.1:5000`
-- 域名或二级目录: 例如 `prekey.iweistoicqc5.top`
+- 域名或二级目录: 例如 `prekey.YOUR_DOMAIN`
 - 申请 SSL 证书 (Let's Encrypt)
 
 **Nginx 配置（宝塔自动生成，关键部分）**：
@@ -51,7 +50,7 @@ python server.py
 ```nginx
 server {
     listen 443 ssl;
-    server_name prekey.iweistoicqc5.top;   # 或使用 iweistoicqc5.top/prekey
+    server_name prekey.YOUR_DOMAIN;
 
     location / {
         proxy_pass http://127.0.0.1:5000;
@@ -97,7 +96,7 @@ systemctl status zhprekey
 
 ```bash
 cd %USERPROFILE%\zhcrypt
-zhcrypt set-server https://prekey.iweistoicqc5.top --token your-token
+zhcrypt set-server https://prekey.YOUR_DOMAIN --token your-token
 zhcrypt upload-prekey default
 ```
 
@@ -105,7 +104,7 @@ zhcrypt upload-prekey default
 
 ```bash
 # 服务端验证
-curl https://prekey.iweistoicqc5.top/v1/health
+curl https://prekey.YOUR_DOMAIN/v1/health
 
 # 客户端验证
 zhcrypt upload-prekey --dry-run

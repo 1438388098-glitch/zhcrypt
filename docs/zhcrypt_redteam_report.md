@@ -35,7 +35,7 @@
 这是当前最危险的链路。代码证据：
 
 - `chat_client.py:207`：`sslopt={} if "wss://" not in self._ws_url else {}` —— 无论 `wss://` 与否，`sslopt` 都是空 dict。即使用 `wss://`，**客户端也不校验证书**（#18 实锤：任意 CA 签发的证书都被接受）。
-- 你的客户端配置 `prekey_server.url = https://iweistoicqc5.top`，WS 会被推导为 `wss://`，但 `sslopt` 为空 → 传输层可被中间人劫持。
+- 你的客户端配置 `prekey_server.url` 指向生产服务器，WS 会被推导为 `wss://`，但 `sslopt` 为空 → 传输层可被中间人劫持。
 - `chat_client.py:240-287`（`_initiate_session` 的 X3DH 握手）：
   - 首次接触时 `local_pub` 为空，`verify_key = bundle_signing_pub`（来自服务器返回的 prekey bundle **自身**）；
   - `ed25519_verify(bundle_signing_pub, spk_pub_pem, spk_sig)` —— 攻击者用**自己的签名私钥**对**自己的 signed prekey** 签名，校验必过；

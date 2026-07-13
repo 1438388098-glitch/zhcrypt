@@ -1,7 +1,7 @@
 # zhcrypt 安全审计报告
 
 **审计日期：** 2026-07-10  
-**审计范围：** `C:\Users\20579\zhcrypt` 全部自研源文件  
+**审计范围：** zhcrypt 全部自研源文件  
 **审计框架：** OWASP ASVS + NIST 密码学指南 + Signal Protocol 规范  
 **审计类型：** 白盒代码审计（只读，未修改任何代码）
 
@@ -66,7 +66,7 @@ zhcrypt 是一个基于 Python 的端到端加密通信系统，实现了 X3DH �
                    │ HTTP (无 TLS)    WebSocket (无 TLS)
                    ▼
 ┌──────────────────────────────────────────────────┐
-│              阿里云 ECS ([REDACTED_IP])           │
+│              阿里云 ECS                         │
 │  ┌─────────────────┐  ┌──────────────────────┐  │
 │  │  server.py      │  │  chat_server.py      │  │
 │  │  Flask :5000    │  │  asyncio WS :5003    │  │
@@ -667,11 +667,11 @@ custom_nonce = nonce_base[:4] + struct.pack(">Q", chunk_index)[:8]
 
 **问题描述：**
 
-服务器部署地址 `[REDACTED_IP]`（阿里云 ECS）硬编码在源码注释中：
+服务器部署地址（阿里云 ECS）硬编码在源码注释中：
 
 ```python
 # server.py:3
-# 部署到阿里云 ECS ([REDACTED_IP]), 通过宝塔 Nginx 反向代理
+# 部署到阿里云 ECS, 通过宝塔 Nginx 反向代理
 ```
 
 **影响评估：**

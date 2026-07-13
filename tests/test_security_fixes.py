@@ -14,6 +14,7 @@ zhcrypt 安全修复回归测试
 
 import os
 import sys
+import re
 import json
 import shutil
 import tempfile
@@ -424,8 +425,6 @@ else:
 # ============================================================
 section("#13 源码无硬编码公网 IP")
 
-# 注意: 本测试已被移动到 tests/ 子目录, 源码在项目根(父目录),
-# 因此 PROJECT_ROOT 必须取父目录才能正确扫描源码中的硬编码 IP/Token。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OWN_PY_FILES = [f for f in os.listdir(PROJECT_ROOT)
                 if f.endswith(".py") and f != "test_security_fixes.py"]
@@ -437,14 +436,13 @@ for fn in OWN_PY_FILES:
             content = fh.read()
     except Exception:
         continue
-    # 仅检测已知的生产服务器 IP, 避免误报 loopback/localhost
-    if "[REDACTED_IP]" in content:
-        ip_leaked.append(fn)
-check("所有自研源文件均不含硬编码公网 IP", len(ip_leaked) == 0,
+    if re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', content):
+        raw = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', content)
+        public = [ip for ip in raw if not ip.startswith(("127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168.", "0."))]
+        if public:
+            ip_leaked.append((fn, public))
+check("所有源文件均不含硬编码公网 IP", len(ip_leaked) == 0,
       f"(命中: {ip_leaked})")
-check("server.py 模块注释已去除 IP",
-      "[REDACTED_IP]" not in open(os.path.join(PROJECT_ROOT, "server.py"),
-                                 encoding="utf-8", errors="ignore").read())
 
 
 # ============================================================

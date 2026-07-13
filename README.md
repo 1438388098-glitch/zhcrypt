@@ -491,7 +491,7 @@ zhcrypt 内置 9 阶段攻击模拟自评（`security_audit` 模块），综合�
 
 ```bash
 # 设 PYTHONPATH 指向项目根与 lib 依赖目录
-set PYTHONPATH=C:\Users\20579\zhcrypt;C:\Users\20579\zhcrypt\lib
+set PYTHONPATH=%CD%;%CD%\lib
 
 # 用隔离 HOME 运行（防止测试写入真实配置/会话）
 set HOME=<临时目录>
@@ -626,7 +626,7 @@ HKDF（基于 HMAC 的密钥派生函数）把原始的 Diffie-Hellman 共享秘
 
 ## 21. 故障排查
 
-- **`script not found` / 打包报找不到 gui.py**：多因 PyInstaller spec 中脚本用了相对路径却不在项目根执行。改为绝对路径（如 `C:\Users\20579\zhcrypt\gui.py`）即可。
+- **`script not found` / 打包报找不到 gui.py**：多因 PyInstaller spec 中脚本用了相对路径却不在项目根执行。改为绝对路径（如 `%CD%\gui.py`）即可。
 - **解密报"密码错误或数据已被篡改"**：先确认口令完全一致（注意中文输入法全角/半角、首尾空格）；再确认密文完整未被截断。GCM 不会"差一点"，失败即代表口令不对或数据损坏。
 - **聊天连不上服务器**：检查 `set-server` 地址是否正确、`upload-prekey` 是否已执行；用 `wss://` 时确认服务器证书有效（或先用 `cert-pin` 固定指纹）。本地调试可用 `ws://`。
 - **大文件上传中途断开**：确认服务端 `max_size` 已调大到 100 MB 且服务已重启；客户端 websocket-client 本身无此限制。

@@ -1,7 +1,7 @@
 """
 zhcrypt Prekey Server v1.0
 ===========================
-部署到阿里云 ECS ([REDACTED_IP]), 通过宝塔 Nginx 反向代理
+部署到阿里云 ECS, 通过宝塔 Nginx 反向代理
 
 Flask + SQLite, 提供 X3DH 协议的 prekey 存储与分发
 
