@@ -1,25 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
-# zhcrypt GUI 打包配置 (Python 3.13 + PyInstaller 6)
-# 目标: 单一运行时目录 + 精简依赖 (修复 37 项优化中的体积/依赖问题)
+# zhcrypt CLI 打包配置 (Python 3.13 + PyInstaller 6)
 
 a = Analysis(
-    ['../gui.py'],
+    ['../cli.py'],
     pathex=['..'],
     binaries=[],
     datas=[],
     hiddenimports=[
+        'secretsharing',
         'certpin',
-        'plyer',
-        'plyer.platforms.win.notification',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'setuptools', 'pkg_resources', 'wheel', 'distutils',
-        'bcrypt', 'multiprocessing', 'decimal', 'xml', 'sqlite3',
+        'bcrypt', 'tkinter', 'plyer', 'ctypes',
+        'multiprocessing', 'decimal', 'xml', 'sqlite3',
         'pydoc', 'unittest', 'doctest', 'pdb', 'lib2to3',
-        'ensurepip', 'pip', 'tkinter.test',
+        'ensurepip', 'pip',
     ],
     noarchive=False,
 )
@@ -30,14 +29,14 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='zhcrypt-gui',
+    name='zhcrypt',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
-    version='version_info_gui.txt',
+    version='version_info_cli.txt',
 )
 
 coll = COLLECT(
@@ -46,5 +45,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name='zhcrypt_gui',
+    name='zhcrypt_cli',
 )

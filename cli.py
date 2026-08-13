@@ -8,6 +8,7 @@ zhcrypt — 中文加密系统 CLI
 
 import os
 import sys
+import re
 import time
 import struct
 import secrets
@@ -213,10 +214,9 @@ def cmd_encrypt(args):
             _err("请提供要加密的文本")
 
     if args.temp_share:
-        words = ["山茶", "东风", "白云", "松柏", "流水", "明月", "清风", "远山",
-                 "晨露", "晚霞", "飞鸟", "落叶", "寒星", "暖阳", "翠竹", "幽兰",
-                 "碧海", "青天", "古道", "长亭"]
-        chosen = [secrets.choice(words) for _ in range(4)]
+        # 审计 HIGH-1: 临时口令熵从 20^4(17.3 bit) 提升到 256^6(≈48 bit)
+        from wordlist import TEMP_WORDS
+        chosen = [secrets.choice(TEMP_WORDS) for _ in range(6)]
         temp_pwd = "·".join(chosen)
         packet = encrypt_password_mode(text, temp_pwd)
         b64 = packet_to_b64(packet)
@@ -702,6 +702,131 @@ def cmd_cert_pin(args):
     print(f"  {S.GREEN}{pin}{S.RESET}")
     _dim(f"添加到配置: zhcrypt set-server {args.url} --pin {pin}")
 
+def _ensure_identity(identity):
+    """确保本地身份存在; 不存在则引导全新用户交互式创建。
+
+    返回 (identity, passphrase) 或 None (用户取消)。
+    """
+    from keys import KeyStore
+    store = KeyStore()
+    exists = False
+    try:
+        store.load_public_key(identity)
+        exists = True
+    except Exception:
+        exists = False
+    if exists:
+        passphrase = getpass.getpass(f"  {S.BOLD}▶{S.RESET} [{identity}] 私钥密码: ")
+        return identity, passphrase
+
+    # 本机已有其他身份: 列出供选择, 而不是静默创建新身份
+    local_ids = []
+    try:
+        for it in store.list_identities():
+            nm = it.get("identity", "")
+            if nm and nm != identity:
+                local_ids.append(nm)
+    except Exception:
+        pass
+    if local_ids:
+        print()
+        _panel("身份不存在", [
+            f"默认身份 [{identity}] 在本机不存在。",
+            f"本机已有身份: {', '.join(local_ids)}",
+        ], S.YELLOW)
+        ans = input(f"  {S.BOLD}▶{S.RESET} 输入要使用的身份名 (回车创建新身份): ").strip()
+        if ans and ans in local_ids:
+            identity = ans
+            passphrase = getpass.getpass(f"  {S.BOLD}▶{S.RESET} [{identity}] 私钥密码: ")
+            return identity, passphrase
+        if ans and ans not in local_ids:
+            identity = ans
+    else:
+        # 全新用户引导: 让用户起自己的名字, 而不是用陌生人的账号
+        print()
+        _panel("首次使用", [
+            f"本机还没有任何身份。",
+            "为了与他人端到端加密通信, 请创建一个属于你自己的身份。",
+            "身份名相当于你的账号名, 朋友需要知道它才能与你通信。",
+        ], S.CYAN)
+        name = input(f"  {S.BOLD}▶{S.RESET} 你的身份名 (回车使用 {identity}): ").strip()
+        identity = name or identity
+
+    # 身份名白名单: 防路径穿越 + 便于 URL 传输
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", identity):
+        _err(f"身份名不合法: 仅允许字母/数字/下划线/点/短横线/@, 最长 64 字符")
+        return None
+    print()
+    pwd1 = getpass.getpass(f"  {S.BOLD}▶{S.RESET} 设置 [{identity}] 私钥密码: ")
+    if not pwd1:
+        _err("密码不能为空")
+        return None
+    pwd2 = getpass.getpass(f"  {S.BOLD}▶{S.RESET} 确认密码: ")
+    if pwd1 != pwd2:
+        _err("两次密码不一致")
+        return None
+    try:
+        with Spinner("正在生成加密密钥 (RSA-4096 + Ed25519 + X25519)..."):
+            store.generate_identity(identity, pwd1, comment="first-run")
+    except FileExistsError:
+        pass  # 并发创建, 视为成功
+    except Exception as e:
+        _err(f"创建身份失败: {e}")
+        return None
+    _ok(f"身份 [{identity}] 创建成功")
+    # 注册后自动上传 prekey 一次: 好友/他人才能找到你
+    try:
+        from chat_client import ChatClient
+        client = ChatClient(identity, pwd1)
+        with Spinner("正在上传 prekey 到服务器..."):
+            client.start()
+            time.sleep(1)
+            ok, msg = client.ensure_own_prekey()
+        client.stop()
+        if ok:
+            _ok(f"prekey 已上传: {msg}")
+        else:
+            _warn(f"prekey 上传待重试: {msg}")
+    except Exception as e:
+        _warn(f"prekey 自动上传未完成 (进入 TUI 后会重试): {e}")
+    return identity, pwd1
+
+
+def cmd_chat_tui(args=None):
+    """启动交互式 TUI 聊天 (轻量类微信, 聊天+文件)。
+
+    设计: 一切操作 (登录/创建身份/prekey/加好友) 都在 TUI 界面内完成,
+    命令行只负责把用户带进界面。
+    """
+    from config import get
+    identity = args.identity if args else None
+    identity = identity or get("default_identity", "default")
+    try:
+        from tui import main as tui_main
+    except ImportError as e:
+        _err(f"TUI 依赖缺失: {e} (请安装 textual: pip install textual)")
+        return 1
+    try:
+        # 密码/身份创建全部交给 TUI 登录屏处理
+        return tui_main(identity)
+    except KeyboardInterrupt:
+        _ok("再见")
+        return 0
+    except Exception as e:
+        # M18 修复: 顶层兜底, 崩溃不再整屏 traceback
+        import traceback
+        try:
+            log_path = os.path.join(os.path.expanduser("~"), ".zhcrypt",
+                                    "local", "tui.log")
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.datetime.now()}] TUI 异常:\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        _err(f"聊天界面异常退出: {e} (详情见 ~/.zhcrypt/local/tui.log)")
+        return 3
+
 def cmd_chat_send(args):
     from config import get
     identity = args.identity or get("default_identity", "default")
@@ -1053,7 +1178,8 @@ def main():
     p_params.add_argument("--mem", type=int, default=None)
     p_params.add_argument("--par", type=int, default=None)
 
-    sub.add_parser("chat")
+    p_chat = sub.add_parser("chat")
+    p_chat.add_argument("-i", "--identity", default=None)
 
     p_chat_send = sub.add_parser("chat-send")
     p_chat_send.add_argument("text", nargs="?", default=None)
@@ -1101,7 +1227,7 @@ def main():
         "chat-history": cmd_chat_history, "chat-status": cmd_chat_status,
         "chat-delete": cmd_chat_delete, "chat-safety": cmd_chat_safety,
         "cert-pin": cmd_cert_pin, "install-path": cmd_install_path,
-        "chat": cmd_chat_poll,
+        "chat": cmd_chat_tui,
     }
     fn = dispatch.get(args.command)
     if fn:

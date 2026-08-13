@@ -82,7 +82,11 @@ def generate_x25519_keypair_raw():
 def x25519_ecdh_raw(priv_raw, pub_raw):
     priv = x25519.X25519PrivateKey.from_private_bytes(priv_raw)
     pub = x25519.X25519PublicKey.from_public_bytes(pub_raw)
-    return priv.exchange(pub)
+    shared = priv.exchange(pub)
+    # 低阶点/恶意公钥防护 (审计 M7): 全零共享秘密意味着对端为低阶点。
+    if shared == b"\x00" * 32:
+        raise ValueError("X25519 共享秘密为全零 (低阶点/恶意公钥)")
+    return shared
 
 
 def pub_from_raw(raw):
@@ -304,6 +308,13 @@ def _decrypt_message_in_chain(state, payload, msg):
     sid = state.session_id
     if isinstance(sid, str):
         sid = sid.encode()
+
+    # 消息号合法性 + 跳变钳制 (审计 M1): message_number 由对端控制,
+    # 非整数或超大跳变会触发数十亿次 HKDF 派生 (CPU DoS) 且使链永久失步。
+    if not isinstance(msg_num, int) or isinstance(msg_num, bool) or msg_num < 0:
+        return None
+    if msg_num - state.recv_msg_number > MAX_SKIPPED:
+        return None
 
     if state.recv_msg_number > msg_num:
         mk = state._get_skipped(state.their_ratchet_pub, msg_num)

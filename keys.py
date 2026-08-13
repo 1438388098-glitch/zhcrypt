@@ -113,6 +113,14 @@ _DEFAULT_KEY_DIR = os.path.join(os.path.expanduser("~"), ".zhcrypt", "keys")
 _DEFAULT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".zhcrypt")
 
 
+def _restrict_private(path: str):
+    """收紧私钥文件权限到 0600 (POSIX); Windows 上为尽力而为, 不抛异常。"""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def default_key_dir():
     return _DEFAULT_KEY_DIR
 
@@ -188,12 +196,15 @@ class KeyStore:
         rsa_key_pem = serialize_private_key_raw(private_key)
         with open(private_path, "wb") as f:
             f.write(_wrap_key_data(passphrase, rsa_key_pem))
+        _restrict_private(private_path)
 
         with open(sig_priv_path, "wb") as f:
             f.write(_wrap_key_data(passphrase, serialize_ed25519_private_key(sig_priv)))
+        _restrict_private(sig_priv_path)
 
         with open(kem_priv_path, "wb") as f:
             f.write(_wrap_key_data(passphrase, serialize_x25519_private_key(kem_priv)))
+        _restrict_private(kem_priv_path)
 
         meta = {
             "identity": identity,
@@ -301,6 +312,7 @@ class KeyStore:
             f.write(serialize_x25519_public_key(kem_pub))
         with open(priv_path, "wb") as f:
             f.write(_wrap_key_data(passphrase, serialize_x25519_private_key(kem_priv)))
+        _restrict_private(priv_path)
         meta_path = os.path.join(self.key_dir, f"{identity}.meta")
         if os.path.exists(meta_path):
             try:
@@ -408,12 +420,15 @@ class KeyStore:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         keys = []
+        key_cache = {}
         for entry in data.get("keys", []):
             try:
                 salt = urlsafe_b64decode(entry["salt"].encode("ascii"))
                 nonce = urlsafe_b64decode(entry["nonce"].encode("ascii"))
                 enc_priv = urlsafe_b64decode(entry["enc_priv"].encode("ascii"))
-                wrapping_key = derive_key(passphrase, salt)
+                if salt not in key_cache:
+                    key_cache[salt] = derive_key(passphrase, salt)
+                wrapping_key = key_cache[salt]
                 pem = AESGCM(wrapping_key).decrypt(nonce, enc_priv, None)
                 priv = deserialize_x25519_private_key(pem)
                 keys.append((entry["index"], priv))
@@ -622,8 +637,9 @@ class KeyStore:
             del meta["display_name"]
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
-        return public_path
+        return meta_path
 
+    @_validate_identity_arg
     def import_peer_static_keys(self, identity: str, idk_b64: str = None,
                                 spk_b64: str = None, signing_b64: str = None):
         """自动导入对端静态公钥 (覆盖写, 不抛异常)。
@@ -688,6 +704,14 @@ class KeyStore:
 
         otp_public_keys = []
         otp_entries = []
+        # 性能修复 (动态测试发现): 全部 OTP 共用同一个 salt 派生包密钥,
+        # 避免 load_otp_private_keys 对每个 OTP 各做一次 Argon2id(256MB) 派生
+        # (50 次串行派生会致首次会话解密 ~1 分钟, 且可被恶意 x3dh_init 当 CPU DoS)。
+        # 安全: 复用 salt (→同密钥) 合法, 但 nonce 必须每份唯一 —— 否则同一
+        # (key, nonce) 下 50 份密文复用 GCM keystream, 触发 Joux forbidden attack
+        # 与已知明文恢复 (审计 CRITICAL: AEAD nonce 复用)。
+        otp_salt = secrets.token_bytes(SALT_SIZE)
+        otp_wrapping_key = derive_key(passphrase, otp_salt)
         for i in range(otp_count):
             otp_priv, otp_pub = generate_x25519_key_pair()
             otp_pub_b64 = urlsafe_b64encode(
@@ -696,11 +720,9 @@ class KeyStore:
             otp_public_keys.append(otp_pub_b64)
 
             otp_priv_pem = serialize_x25519_private_key(otp_priv)
-            otp_salt = secrets.token_bytes(SALT_SIZE)
-            otp_nonce = secrets.token_bytes(12)
-            wrapping_key = derive_key(passphrase, otp_salt)
+            otp_nonce = secrets.token_bytes(12)  # 每份 OTP 独立 nonce
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            enc_priv = AESGCM(wrapping_key).encrypt(otp_nonce, otp_priv_pem, None)
+            enc_priv = AESGCM(otp_wrapping_key).encrypt(otp_nonce, otp_priv_pem, None)
             otp_entries.append({
                 "index": i,
                 "salt": urlsafe_b64encode(otp_salt).decode("ascii"),

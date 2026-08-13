@@ -531,7 +531,11 @@ try:
             return self
         async def __anext__(self):
             if not self._q:
-                raise _wsmod.exceptions.ConnectionClosed(1000, "eof")
+                # 兼容新旧 websockets 的 ConnectionClosed 构造签名
+                try:
+                    raise _wsmod.exceptions.ConnectionClosed(None, None)
+                except TypeError:
+                    raise _wsmod.exceptions.ConnectionClosed(1000, "eof")
             return self._q.pop(0)
         async def send(self, data):
             self.sent.append(json.loads(data))

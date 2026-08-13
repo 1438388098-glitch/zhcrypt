@@ -20,6 +20,7 @@ import base64
 
 try:
     import websockets
+    import websockets.exceptions
 except ImportError:
     sys.exit("websockets 未安装: pip install websockets")
 
@@ -34,6 +35,7 @@ from schema import (
     MESSAGES_IDX_SESSION_SQL,
     FILES_TABLE_SQL,
     add_column,
+    valid_identity,
 )
 
 DB_PATH = os.environ.get("ZHPREKEY_DB",
@@ -52,7 +54,11 @@ PORT = int(os.environ.get("ZHCHAT_WS_PORT", "5003"))
 HOST = os.environ.get("ZHCHAT_WS_HOST", "0.0.0.0")
 MESSAGE_RETENTION_DAYS = int(os.environ.get("ZHCHAT_RETENTION_DAYS", "30"))
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("ZHCHAT_RATE_LIMIT", "30"))
-FILE_DIR = os.path.join(os.path.dirname(DB_PATH), "files")
+# M1 修复: 与 server.py 统一从 ZHCHAT_FILE_DIR 解析文件目录 (默认 DB 同目录 files/)
+FILE_DIR = os.environ.get(
+    "ZHCHAT_FILE_DIR",
+    os.path.join(os.path.dirname(DB_PATH), "files"),
+)
 os.makedirs(FILE_DIR, exist_ok=True)
 
 connected_clients = {}
@@ -130,12 +136,15 @@ def _resolve_file_path(token):
 
 def check_rate_limit(identity):
     now = _now()
-    bucket = rate_limit_buckets.get(identity, [])
-    bucket = [t for t in bucket if now - t < 60]
-    rate_limit_buckets[identity] = bucket
+    bucket = [t for t in rate_limit_buckets.get(identity, []) if now - t < 60]
+    if bucket:
+        rate_limit_buckets[identity] = bucket
+    else:
+        rate_limit_buckets.pop(identity, None)  # 防键无限增长 (内存 DoS, 审计 M5)
     if len(bucket) >= RATE_LIMIT_PER_MINUTE:
         return False
     bucket.append(now)
+    rate_limit_buckets[identity] = bucket
     return True
 
 
@@ -264,15 +273,18 @@ def cleanup_old_messages():
 
 
 async def push_to_identity(identity, msg):
-    if identity in connected_clients:
-        ws = connected_clients[identity]
-        try:
-            await ws.send(json.dumps({
-                "type": "message",
-                "msg": msg,
-            }, ensure_ascii=False))
-            return True
-        except Exception:
+    ws = connected_clients.get(identity)
+    if ws is None:
+        return False
+    try:
+        await ws.send(json.dumps({
+            "type": "message",
+            "msg": msg,
+        }, ensure_ascii=False))
+        return True
+    except Exception:
+        # 仅当条目仍指向该连接时才移除 (防止误删同身份新连接)
+        if connected_clients.get(identity) is ws:
             connected_clients.pop(identity, None)
     return False
 
@@ -301,6 +313,12 @@ async def handler(websocket, path=None):
                 if not ident:
                     await websocket.send(json.dumps(
                         {"type": "error", "code": 400, "message": "missing identity"}))
+                    return
+                # 服务端身份名校验 (审计 H4): 拒绝路径穿越/非法身份名。
+                if not valid_identity(ident):
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 400, "message": "invalid identity"}))
+                    await websocket.close()
                     return
                 identity = ident
                 connected_clients[identity] = websocket
@@ -333,8 +351,10 @@ async def handler(websocket, path=None):
                     {"type": "ack", "msg_id": msg["id"]}))
 
                 pushed = await push_to_identity(msg["to"], msg)
-                if not pushed:
-                    pass
+                if pushed:
+                    # D1 修复: 推送成功即标记已送达, 防止重连后 get_pending
+                    # 重复拉取同一消息, 导致 Double Ratchet 重复解密错乱。
+                    mark_delivered([msg["id"]])
 
             elif msg_type == "ping":
                 await websocket.send(json.dumps({"type": "pong"}))
@@ -356,6 +376,11 @@ async def handler(websocket, path=None):
 
             elif msg_type == "file_upload":
                 if not identity:
+                    continue
+                # 文件上传同样限流 (审计 M5): 防认证客户端循环上传写满磁盘。
+                if not check_rate_limit(identity):
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 429, "message": "rate limited"}))
                     continue
                 file_data_b64 = data.get("file_data", "")
                 if not file_data_b64:
@@ -381,6 +406,11 @@ async def handler(websocket, path=None):
 
             elif msg_type == "file_download":
                 if not identity:
+                    continue
+                # 文件下载同样限流 (审计 M5)。
+                if not check_rate_limit(identity):
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 429, "message": "rate limited"}))
                     continue
                 token = data.get("token", "")
                 file_path = _resolve_file_path(token)
@@ -418,7 +448,10 @@ async def handler(websocket, path=None):
         pass
     finally:
         if identity:
-            connected_clients.pop(identity, None)
+            # MAJOR-8 修复: 仅当当前条目仍是本连接时才移除,
+            # 防止旧连接断开误删同身份的新连接条目 (实时推送静默失效)
+            if connected_clients.get(identity) is websocket:
+                connected_clients.pop(identity, None)
 
 
 async def cleanup_loop():
@@ -431,11 +464,22 @@ async def cleanup_loop():
         except Exception as e:
             log.info(f"[cleanup] error: {e}")
         try:
-            cutoff = _now() - 1800
+            # E2 修复: 正式文件保留 30 天 (与消息保留期一致), 仅回收 .part
+            # 临时文件 (30 分钟)。cleanup_loop 误删正式文件会导致上传后
+            # 稍晚下载即 404。
+            file_cutoff = _now() - 30 * 86400
+            part_cutoff = _now() - 1800
             count = 0
             for fname in os.listdir(FILE_DIR):
                 fpath = os.path.join(FILE_DIR, fname)
-                if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+                if not os.path.isfile(fpath):
+                    continue
+                mtime = os.path.getmtime(fpath)
+                if fname.endswith(".part"):
+                    if mtime < part_cutoff:
+                        os.remove(fpath)
+                        count += 1
+                elif mtime < file_cutoff:
                     os.remove(fpath)
                     count += 1
             if count:

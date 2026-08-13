@@ -59,11 +59,16 @@ def recover_secret(shares: list, threshold=SHARES_THRESHOLD) -> bytes:
     if len(shares) < threshold:
         raise ValueError(f"需要至少 {threshold} 个份额, 当前只有 {len(shares)} 个")
 
+    if len({idx for idx, _ in shares}) != len(shares):
+        raise ValueError("份额序号存在重复, 请检查输入")
+
     points = [(idx, _bytes_to_int(bytes.fromhex(hex_data)))
               for idx, hex_data in shares[:threshold]]
 
     secret_int = _lagrange_interpolate(points, 0)
-    return _int_to_bytes(secret_int, BYTE_LEN).rstrip(b"\x00")
+    # 修复: 不再 rstrip 尾零 —— 若秘密字节本身以 0x00 结尾, rstrip 会截断密钥,
+    # 导致 AES-GCM 解密失败、备份无法恢复 (约 1/256 概率)。长度恒为 BYTE_LEN。
+    return _int_to_bytes(secret_int, BYTE_LEN)
 
 
 def format_share(identity: str, idx: int, hex_data: str) -> str:

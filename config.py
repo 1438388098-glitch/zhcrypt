@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "signature_enabled": True,
     "prekey_server": {
         "url": "https://iweistoicqc5.top",
-        "auth_token": _load_build_token(),
+        "auth_token": "",
         "auth_token_enc": "",
         "cert_pin": "",
         "auto_upload_prekeys": True,
@@ -157,6 +157,26 @@ def _decrypt_token(hexblob: str) -> str:
     return AESGCM(key).decrypt(nonce, ct, None).decode("utf-8")
 
 
+def encrypt_bytes(plaintext: bytes) -> bytes:
+    """用设备密钥 AES-256-GCM 加密任意字节 (供 localstore 加密文件密钥等)。
+
+    返回 nonce(12) + ciphertext+tag。设备密钥缺失/损坏时抛异常。
+    """
+    if AESGCM is None:
+        raise RuntimeError("cryptography 不可用, 无法加密")
+    key = _load_device_key()
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(key).encrypt(nonce, plaintext, None)
+    return nonce + ct
+
+
+def decrypt_bytes(blob: bytes) -> bytes:
+    """解密 encrypt_bytes 的产物; 失败抛异常。"""
+    key = _load_device_key()
+    nonce, ct = blob[:12], blob[12:]
+    return AESGCM(key).decrypt(nonce, ct, None)
+
+
 def set_prekey_server(url: str, token: str = None):
     """配置 prekey 服务器地址; 若提供 token, 以设备密钥加密存储 (审计 #8), 不落明文。"""
     cfg = load()
@@ -197,8 +217,9 @@ def get_auth_token():
         except Exception:
             pass
         return legacy
-    # 零配置兜底: 任何位置都未配置 token 时, 回退到内置默认 token (分发给朋友用)
-    return DEFAULT_CONFIG.get("prekey_server", {}).get("auth_token", "")
+    # 零配置兜底: 任何位置都未配置 token 时, 仅内存返回 .build_token (分发给朋友用),
+    # 不落盘、不写入 DEFAULT_CONFIG (审计 M3: 防首次运行把真实 token 明文写进 config.json)。
+    return _load_build_token()
 
 
 def set_cert_pin(pin: str):

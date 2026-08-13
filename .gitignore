@@ -27,6 +27,10 @@ files/
 zhcrypt_local_defaults.json
 zhcrypt_local_defaults.jsonc
 
+# 敏感数据文件 (真实姓名→公钥映射 / 含完整 git 历史与凭证的打包, 严禁入库)
+_signing_map.tsv
+1.zip
+
 # 调试 / 临时脚本残留 (以 _ 前缀)
 _*.py
 

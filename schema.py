@@ -3,6 +3,21 @@
 修改表结构只动此处。"""
 from sqlite3 import Connection
 
+import re
+
+# 身份名白名单 (对齐 keys._validate_identity): 仅 A-Za-z0-9_.@-, 长度 1-64,
+# 禁 ".." 与 "/"、"\". 服务端必须在入口校验, 防止恶意身份名注入 (路径穿越/冒名)。
+_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+
+
+def valid_identity(identity):
+    """服务端身份名合法性校验; 非法返回 False。"""
+    if not isinstance(identity, str) or not identity:
+        return False
+    if ".." in identity:
+        return False
+    return bool(_IDENTITY_RE.match(identity))
+
 
 PREKEYS_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS prekeys (

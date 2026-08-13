@@ -28,7 +28,7 @@ from cryptography.hazmat.backends import default_backend
 
 from argon2.low_level import hash_secret_raw, Type
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 MAGIC = b"ZHCR"
 VERSION = 1
@@ -68,16 +68,23 @@ def _clear_bytes(data: bytearray):
 
 
 def _get_argon2_params():
-    """从配置文件读取 Argon2id 参数 (如果可用)"""
+    """从配置文件读取 Argon2id 参数 (如果可用)
+
+    安全钳制 (加密审查 4.9): 限制 memory_cost <= 2GiB、time_cost <= 100,
+    防止配置误写导致解密时 OOM。
+    """
     try:
         from config import load
         cfg = load()
         a = cfg.get("argon2id", {})
-        return (
-            a.get("time_cost", ARGON2_TIME_COST),
-            a.get("memory_cost", ARGON2_MEMORY_COST),
-            a.get("parallelism", ARGON2_PARALLELISM),
-        )
+        tc = int(a.get("time_cost", ARGON2_TIME_COST))
+        mc = int(a.get("memory_cost", ARGON2_MEMORY_COST))
+        pl = int(a.get("parallelism", ARGON2_PARALLELISM))
+        if mc > 2 * 1024 * 1024:
+            mc = 2 * 1024 * 1024
+        if tc > 100:
+            tc = 100
+        return (tc, mc, pl)
     except Exception:
         return (ARGON2_TIME_COST, ARGON2_MEMORY_COST, ARGON2_PARALLELISM)
 
@@ -106,6 +113,35 @@ def derive_key(password: str, salt: bytes,
     Returns:
         bytes: 派生的 256 位密钥
     """
+    # 安全钳制 (红队模拟发现: 密文头参数可被伪造为极大值导致派生无限卡死):
+    # 解密路径的参数来自密文包头, 攻击者翻转字节即可构造 time_cost=2^32 级
+    # 的派生请求, 单次派生需数月/数十年, 形成 CPU DoS。这里统一钳制:
+    #   time_cost    ∈ [1, 16]     (超过 16 轮无现实意义, 按默认回退)
+    #   memory_cost  ∈ [8 MiB, 2 GiB]
+    #   parallelism  ∈ [1, 16]
+    # 钳制后若与加密时参数不一致, 解密将正常失败 (拒绝), 而非卡死。
+    try:
+        if not (1 <= int(time_cost) <= 16):
+            time_cost = ARGON2_TIME_COST
+        if not (8 * 1024 <= int(memory_cost) <= 2 * 1024 * 1024):
+            memory_cost = ARGON2_MEMORY_COST
+        if not (1 <= int(parallelism) <= 16):
+            parallelism = ARGON2_PARALLELISM
+    except (TypeError, ValueError):
+        time_cost = ARGON2_TIME_COST
+        memory_cost = ARGON2_MEMORY_COST
+        parallelism = ARGON2_PARALLELISM
+
+    # 乘积钳制 (审计 HIGH-4): Argon2 总内存 = memory_cost × parallelism。
+    # 单项钳制不足以防止 memory=2GiB × parallelism=16 = 32GiB 的内存耗尽 DoS。
+    # 限制总内存 ≤ 2GiB, 超出时按 memory 优先缩减 parallelism (最低 1)。
+    try:
+        max_total = 2 * 1024 * 1024  # 2 GiB (单位 KiB)
+        if int(memory_cost) * int(parallelism) > max_total:
+            parallelism = max(1, max_total // int(memory_cost))
+    except (TypeError, ValueError):
+        pass
+
     password_bytes = password.encode("utf-8")
     key = hash_secret_raw(
         secret=password_bytes,
@@ -655,7 +691,12 @@ def x25519_ecdh(private_key_pem: bytes, public_key_pem: bytes) -> bytes:
     """
     private_key = deserialize_x25519_private_key(private_key_pem)
     public_key = deserialize_x25519_public_key(public_key_pem)
-    return private_key.exchange(public_key)
+    shared = private_key.exchange(public_key)
+    # 低阶点/恶意公钥防护 (审计 M7): 共享秘密全零意味着对端公钥为低阶点,
+    # 会使 ECDH 结果落入可枚举小集合。RFC 7748 §6.1 要求拒绝。
+    if shared == b"\x00" * 32:
+        raise ValueError("X25519 共享秘密为全零 (低阶点/恶意公钥)")
+    return shared
 
 
 def x3dh_shared_secret(
@@ -813,22 +854,31 @@ def decrypt_hybrid_signed(
     except Exception:
         raise DecryptionError("解密失败: 密文已损坏或被篡改")
 
-    offset = 0
-    sender_len = struct.unpack(">H", inner[offset:offset + 2])[0]
-    offset += 2
-    sender = inner[offset:offset + sender_len].decode("utf-8")
-    offset += sender_len
-    ts = struct.unpack(">Q", inner[offset:offset + 8])[0]
-    offset += 8
+    try:
+        offset = 0
+        sender_len = struct.unpack(">H", inner[offset:offset + 2])[0]
+        offset += 2
+        sender = inner[offset:offset + sender_len].decode("utf-8")
+        offset += sender_len
+        ts = struct.unpack(">Q", inner[offset:offset + 8])[0]
+        offset += 8
+    except (struct.error, UnicodeDecodeError, IndexError):
+        raise DecryptionError("解密失败: 明文结构损坏")
 
     if not has_sig:
-        plaintext = inner[offset:].decode("utf-8")
+        try:
+            plaintext = inner[offset:].decode("utf-8")
+        except UnicodeDecodeError:
+            raise DecryptionError("解密失败: 明文结构损坏")
         return {"plaintext": plaintext, "sender": sender, "verified": False, "timestamp": ts}
 
     sig_len = struct.unpack(">H", inner[-66:-64])[0]
     sig = inner[-sig_len:]
     plaintext_bytes = inner[offset:-sig_len - 2]
-    plaintext = plaintext_bytes.decode("utf-8")
+    try:
+        plaintext = plaintext_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise DecryptionError("解密失败: 明文结构损坏")
 
     sig_body = sender.encode("utf-8") + struct.pack(">Q", ts) + plaintext_bytes
 
@@ -935,7 +985,10 @@ def decrypt_pfs(
     offset = 7
     sender_len = struct.unpack(">H", packet[offset:offset + 2])[0]
     offset += 2
-    sender = packet[offset:offset + sender_len].decode("utf-8")
+    try:
+        sender = packet[offset:offset + sender_len].decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("无效的发件人字段")
     offset += sender_len
 
     sender_id_pub_raw = packet[offset:offset + 32]
@@ -971,22 +1024,31 @@ def decrypt_pfs(
     except Exception:
         raise DecryptionError("解密失败: 密文已损坏或密钥不匹配")
 
-    off = 0
-    sender_len2 = struct.unpack(">H", inner[off:off + 2])[0]
-    off += 2
-    sender_name = inner[off:off + sender_len2].decode("utf-8")
-    off += sender_len2
-    ts = struct.unpack(">Q", inner[off:off + 8])[0]
-    off += 8
+    try:
+        off = 0
+        sender_len2 = struct.unpack(">H", inner[off:off + 2])[0]
+        off += 2
+        sender_name = inner[off:off + sender_len2].decode("utf-8")
+        off += sender_len2
+        ts = struct.unpack(">Q", inner[off:off + 8])[0]
+        off += 8
+    except (struct.error, UnicodeDecodeError, IndexError):
+        raise DecryptionError("解密失败: 明文结构损坏")
 
     if not has_sig:
-        plaintext = inner[off:].decode("utf-8")
+        try:
+            plaintext = inner[off:].decode("utf-8")
+        except UnicodeDecodeError:
+            raise DecryptionError("解密失败: 明文结构损坏")
         return {"plaintext": plaintext, "sender": sender, "verified": False, "timestamp": ts}
 
     sig_len = struct.unpack(">H", inner[-66:-64])[0]
     sig = inner[-sig_len:]
     plaintext_bytes = inner[off:-sig_len - 2]
-    plaintext = plaintext_bytes.decode("utf-8")
+    try:
+        plaintext = plaintext_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise DecryptionError("解密失败: 明文结构损坏")
 
     sig_body = sender_name.encode("utf-8") + struct.pack(">Q", ts) + plaintext_bytes
     verified = False
@@ -1124,6 +1186,12 @@ def decrypt_file_stream(filepath, password, output_path=None, overwrite=False):
         name_bytes = f.read(name_len)
         original_name = name_bytes.decode("utf-8")
 
+        # 路径穿越防护 (审计 HIGH-2): 原始文件名来自密文头, 未纳入 GCM 认证,
+        # 客户端可控。强制取 basename 剥离任何目录分量, 拒绝空名/纯 "."/".."。
+        original_name = os.path.basename(original_name).strip()
+        if not original_name or original_name in (".", ".."):
+            original_name = "decrypted"
+
         chunk_count = struct.unpack(">Q", f.read(8))[0]
 
         master_key = derive_key(password, salt, time_cost, memory_cost, parallelism, KEY_SIZE)
@@ -1219,8 +1287,10 @@ def decrypt_deniable(packet: bytes, password: str) -> dict:
       {"text": str, "type": "real"|"duress", "error": None}
       或 {"text": None, "type": None, "error": "错误信息"}
     """
-    if len(packet) < 4 or packet[:4] != MAGIC:
+    if len(packet) < 6 or packet[:4] != MAGIC:
         raise ValueError("无效魔数")
+    if packet[4] != VERSION_V2:
+        raise ValueError(f"不支持的版本: {packet[4]}")
     if packet[5] != MODE_DENIABLE:
         raise ValueError("不是可否认加密模式")
 

@@ -45,6 +45,25 @@ def build_ws_sslopt(ws_url):
     return {}
 
 
+def _friendly_conn_error(e):
+    """把连接异常映射为可读中文短句 (M17: 不再把 traceback 糊给用户)。"""
+    msg = str(e)
+    name = type(e).__name__
+    if name == "ConnectionRefusedError" or "Connection refused" in msg:
+        return "无法连接服务器: 服务器未启动或地址错误"
+    if name == "gaierror" or "getaddrinfo" in msg or "Name or service not known" in msg:
+        return "无法解析服务器域名, 请检查网络或服务器地址"
+    if name == "TimeoutError" or "timed out" in msg:
+        return "连接服务器超时, 正在自动重试"
+    if "SSLCertVerificationError" in msg or "certificate" in msg.lower():
+        return "服务器证书校验失败, 可能被中间人劫持"
+    if "AuthenticationError" in msg or "认证失败" in msg:
+        return "服务器认证失败: token 可能已失效"
+    if name == "ConnectionResetError" or "Connection reset" in msg:
+        return "服务器连接被重置, 正在自动重连"
+    return f"连接失败: {msg[:80]}"
+
+
 class ChatClient:
     def __init__(self, identity, passphrase):
         self.identity = identity
@@ -114,6 +133,9 @@ class ChatClient:
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("Content-Type", "application/json")
+        # Cloudflare 按 UA 拦截: urllib 默认 "Python-urllib/x.y" 会被 403 (1010),
+        # 必须带应用 UA 才能通过 CDN
+        req.add_header("User-Agent", "zhcrypt-client/3.1")
 
         ctx = ssl.create_default_context()
         try:
@@ -221,10 +243,8 @@ class ChatClient:
 
             except Exception as e:
                 if not reported_error:
-                    import traceback
-                    details = traceback.format_exc().split('\n')
-                    brief = " ".join(l.strip() for l in details[-3:-1] if l.strip())
-                    INBOUND.put({"action": "error", "message": f"连接失败: {e} [{brief}]"})
+                    # M17 修复: 常见异常映射为中文短句, 不把 traceback 糊给用户
+                    INBOUND.put({"action": "error", "message": _friendly_conn_error(e)})
                     reported_error = True
 
             self._connected = False
@@ -243,6 +263,8 @@ class ChatClient:
             self._ws_url,
             timeout=120,
             sslopt=sslopt,
+            # Cloudflare 按 UA 拦截: websocket 默认 "Python-urllib/x.y" 会被 403
+            header={"User-Agent": "zhcrypt-client/3.1"},
         )
         # 审计 #18: 证书固定 (pinning) —— 即便存在 rogue CA, 不匹配固定指纹也拒连
         pin = self._get_cert_pin()
@@ -282,17 +304,21 @@ class ChatClient:
                 "服务端证书指纹与固定值不符, 疑似中间人攻击 (审计 #18)")
 
     def send_chat_message(self, peer_identity, plaintext):
-        state = load_session(self.identity, peer_identity, self.passphrase)
+        # C1 修复 (Agent-3): 会话锁包住 load→mutate→save, 防 Binder 解密
+        # 与主线程发送并发覆写 ratchet 状态
+        from session import session_lock
+        with session_lock(self.identity, peer_identity):
+            state = load_session(self.identity, peer_identity, self.passphrase)
 
-        if state is None or state.is_expired():
-            result = self._initiate_session(peer_identity)
-            if result.get("error"):
-                return result
-            state = result["state"]
-            result["state"] = None
-            return self._send_first_message(state, result, plaintext)
+            if state is None or state.is_expired():
+                result = self._initiate_session(peer_identity)
+                if result.get("error"):
+                    return result
+                state = result["state"]
+                result["state"] = None
+                return self._send_first_message(state, result, plaintext)
 
-        return self._send_ratchet_message(state, plaintext)
+            return self._send_ratchet_message(state, plaintext)
 
     def _initiate_session(self, peer_identity):
         from core import urlsafe_b64decode as b64d, ed25519_verify
@@ -336,10 +362,11 @@ class ChatClient:
             if not ed25519_verify(bundle_signing_pub, spk_pub_pem, spk_sig):
                 return {"error": f"{peer_identity} 的 signed prekey 签名验证失败：服务器返回的 bundle 自签名不一致，疑似传输中被篡改或中间人攻击。请通过带外比对安全码确认"}
             verify_key = bundle_signing_pub
-            # bundle 自验证通过, 若与本地历史记录冲突, 视为对方换钥(服务器已证书固定+token 双认证),
-            # 直接更新固定值, 避免每次都卡在"不一致"
+            # 安全修复 (test_security_fixes #5e): 本地 TOFU/联系人公钥与 bundle 不一致时
+            # 拒绝建立会话 (防 MITM 静默换钥), 而不是自动覆盖固定值。
+            # 对方若确实更换了身份密钥, 需先删除本地联系人记录并重新带外导入新公钥束。
             if local_pub and local_pub != bundle_signing_pub:
-                self.store.store_tofu_signing_pub(peer_identity, bundle_signing_pub)
+                return {"error": f"{peer_identity} 的签名公钥与本地记录不一致（对方可能更换了身份密钥，或存在中间人攻击）。请与对方带外比对安全识别码，并在确认后重新导入其最新公钥束"}
         else:
             # 情况 B: 旧版上传未携带签名公钥, 只能回退本地信任锚
             if not local_pub:
@@ -397,8 +424,14 @@ class ChatClient:
         msg["type"] = "x3dh_init"
         msg["payload"]["sender_identity_pub"] = init_extra["sender_identity_pub"]
         msg["payload"]["sender_ephemeral_pub"] = init_extra["sender_ephemeral_pub"]
-        if "signing_public_key" in init_extra:
-            msg["payload"]["signing_public_key"] = init_extra["signing_public_key"]
+        # 协议修复 (动态测试发现): init 消息的 signing_public_key 必须是
+        # 发送方自己的 Ed25519 签名公钥 (接收方据此做 TOFU 固定与安全码计算),
+        # 而不是接收方的公钥。
+        try:
+            msg["payload"]["signing_public_key"] = _b64(
+                self.store.load_signing_public_key(self.identity))
+        except Exception:
+            pass
         msg["payload"]["one_time_prekey_id"] = None
 
         save_session(state, self.passphrase)
@@ -414,8 +447,8 @@ class ChatClient:
     def _send_ratchet_message(self, state, plaintext):
         try:
             signing_priv = self.store.load_signing_private_key_pem(self.identity, self.passphrase)
-            ts = int(time.time())
-            sig_body = f"{self.identity}{ts}{plaintext}".encode("utf-8")
+            # 签名体绑定消息内容, 不绑定时钟 (跨机时钟偏差不再导致验签失败)
+            sig_body = f"{self.identity}{plaintext}".encode("utf-8")
             from cryptography.hazmat.primitives.asymmetric import ed25519
             from cryptography.hazmat.primitives import serialization
             priv = serialization.load_pem_private_key(signing_priv, password=None)
@@ -441,18 +474,115 @@ class ChatClient:
             return {"error": f"发送失败: {err}"}
         return {"status": "sent", "msg_id": msg["id"], "type": "message"}
 
+    def send_friend_msg(self, peer_identity, action):
+        """发送好友关系消息 (request/accept/remove), 走现有 ratchet 加密信道。
+
+        好友消息是带语义的空文本: inner = {"text": "", "friend": {"action": ...}}。
+        无会话时自动先建立会话 (X3DH 握手), 无需用户先发普通消息。
+        成功: {"status":"sent","msg_id":...}   失败: {"error": str}
+        """
+        if action not in ("request", "accept", "remove"):
+            return {"error": f"非法好友动作: {action}"}
+        # C1 修复: 会话锁包住 ratchet 段
+        from session import session_lock
+        with session_lock(self.identity, peer_identity):
+            return self._send_friend_msg_locked(peer_identity, action)
+
+    def _send_friend_msg_locked(self, peer_identity, action):
+        state = load_session(self.identity, peer_identity, self.passphrase)
+        if state is None or state.is_expired():
+            # 自动建立会话 (与 send_chat_message 首条消息逻辑一致)
+            result = self._initiate_session(peer_identity)
+            if result.get("error"):
+                return result
+            state = result["state"]
+            init_extra = result["init_extra"]
+            first_contact = result.get("first_contact", False)
+            safety_number = result.get("safety_number", "")
+
+            sig_b64 = ""
+            try:
+                signing_priv = self.store.load_signing_private_key_pem(
+                    self.identity, self.passphrase)
+                sig_body = f"{self.identity}{action}".encode("utf-8")
+                from cryptography.hazmat.primitives.asymmetric import ed25519
+                from cryptography.hazmat.primitives import serialization
+                priv = serialization.load_pem_private_key(signing_priv, password=None)
+                sig_b64 = _b64(priv.sign(sig_body))
+            except Exception:
+                sig_b64 = ""
+
+            inner = json.dumps({
+                "text": "",
+                "signature": sig_b64,
+                "friend": {"action": action},
+            }, ensure_ascii=False).encode("utf-8")
+
+            msg = send_message(state, inner)
+            msg["type"] = "x3dh_init"
+            msg["payload"]["sender_identity_pub"] = init_extra["sender_identity_pub"]
+            msg["payload"]["sender_ephemeral_pub"] = init_extra["sender_ephemeral_pub"]
+            try:
+                msg["payload"]["signing_public_key"] = _b64(
+                    self.store.load_signing_public_key(self.identity))
+            except Exception:
+                pass
+            msg["payload"]["one_time_prekey_id"] = None
+
+            save_session(state, self.passphrase)
+            if self._ws_ready:
+                err = self._send_via_ws(msg)
+            else:
+                err = self._send_via_rest(msg)
+            if err:
+                return {"error": f"发送失败: {err}"}
+            extra = {}
+            if first_contact:
+                extra["first_contact"] = True
+                extra["safety_number"] = safety_number
+            return {"status": "sent", "msg_id": msg["id"], "type": "friend", **extra}
+
+        sig_b64 = ""
+        try:
+            signing_priv = self.store.load_signing_private_key_pem(
+                self.identity, self.passphrase)
+            # 签名体绑定动作内容 (防重放/篡改动作)
+            sig_body = f"{self.identity}{action}".encode("utf-8")
+            from cryptography.hazmat.primitives.asymmetric import ed25519
+            from cryptography.hazmat.primitives import serialization
+            priv = serialization.load_pem_private_key(signing_priv, password=None)
+            sig_b64 = _b64(priv.sign(sig_body))
+        except Exception:
+            sig_b64 = ""
+
+        inner = json.dumps({
+            "text": "",
+            "signature": sig_b64,
+            "friend": {"action": action},
+        }, ensure_ascii=False).encode("utf-8")
+
+        msg = send_message(state, inner)
+        save_session(state, self.passphrase)
+
+        if self._ws_ready:
+            err = self._send_via_ws(msg)
+        else:
+            err = self._send_via_rest(msg)
+        if err:
+            return {"error": f"发送失败: {err}"}
+        return {"status": "sent", "msg_id": msg["id"], "type": "friend"}
+
     def _send_via_ws(self, msg):
         try:
             self._send_queue.put_nowait(
                 json.dumps({"type": "send", "msg": msg}, ensure_ascii=False))
             return None
         except Exception as e:
-            result = self._http_request("POST", "/v1/messages/send", msg)
-            if result.get("error"):
-                return result["error"]
-            return None
+            return self._send_via_rest(msg)
 
     def _send_via_rest(self, msg):
+        msg = dict(msg)
+        msg["identity"] = self.identity
         result = self._http_request("POST", "/v1/messages/send", msg)
         if result.get("error"):
             return result["error"]
@@ -516,6 +646,19 @@ class ChatClient:
         stored = resp.get("one_time_stored", "?") if isinstance(resp, dict) else "?"
         return True, f"已自动上传 prekey(剩余 {stored})"
 
+    def fetch_server_identities(self):
+        """拉取服务器上所有已注册的身份 (私人服务器: 好友发现来源)。
+
+        GET /v1/identities → {"identities": [{identity, fingerprint, last_seen}]}
+        返回 [{identity, fingerprint, last_seen}] 列表; 失败 {"error": str}
+        """
+        resp = self._http_request("GET", "/v1/identities")
+        if isinstance(resp, dict) and resp.get("error"):
+            return {"error": resp["error"]}
+        if not isinstance(resp, dict):
+            return {"error": "服务器返回格式异常"}
+        return resp.get("identities", [])
+
     def fetch_peer_meta(self, peer_identity: str):
         """只读端点拉取对端静态公钥(不消耗 OTP)。
 
@@ -556,6 +699,22 @@ class ChatClient:
             pass
 
     def receive_chat_message(self, msg):
+        # C1 修复 (Agent-3): 会话锁包住整个解密→save 段,
+        # 防与发送线程并发覆写 ratchet 状态
+        from session import session_lock
+        peer_identity = msg["from"]
+        # 防御纵深 (审计 H4): 服务端虽已校验身份名, 但本地仍拒绝非法对端身份,
+        # 避免后续会话路径拼接抛异常或写越界文件。
+        try:
+            from schema import valid_identity
+            if not valid_identity(self.identity) or not valid_identity(peer_identity):
+                return {"error": f"非法对端身份: {peer_identity!r}"}
+        except Exception:
+            return {"error": "身份名校验失败"}
+        with session_lock(self.identity, peer_identity):
+            return self._receive_chat_message_locked(msg)
+
+    def _receive_chat_message_locked(self, msg):
         peer_identity = msg["from"]
         state = load_session(self.identity, peer_identity, self.passphrase)
         import sys as _sys
@@ -573,6 +732,11 @@ class ChatClient:
             return self._handle_x3dh_init(msg)
 
         if msg_type == "x3dh_reply":
+            # 重放去重 (审计 M8): 该分支此前缺少 seen 检查, 恶意服务器可重放
+            # 已收消息造成重复解密/重复展示。
+            if state._has_seen(msg.get("id", "")):
+                return None
+            state._mark_seen(msg.get("id", ""))
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
             from cryptography.hazmat.primitives.kdf.hkdf import HKDF
             from cryptography.hazmat.primitives import hashes
@@ -628,6 +792,18 @@ class ChatClient:
                     return {"error": f"{sender_identity} 的签名公钥与历史记录不一致（疑似中间人或已更换密钥），拒绝建立会话"}
             except Exception:
                 self.store.store_tofu_signing_pub(sender_identity, sender_signing_pub_pem)
+
+        # Tier 1 对等 (协议修复): 缓存发送方静态公钥到本地联系人,
+        # 使安全识别码可离线计算、消息验签无需服务器。init 消息现携带
+        # 发送方自己的 signing_public_key (协议修复), 与 identity key 一并落地。
+        try:
+            self.store.import_peer_static_keys(
+                sender_identity,
+                idk_b64=payload.get("sender_identity_pub", ""),
+                signing_b64=payload.get("signing_public_key", ""),
+            )
+        except Exception:
+            pass
 
         my_id_priv_pem = self.store.load_kem_private_key_pem(self.identity, self.passphrase)
         my_id_priv_raw = pem_priv_to_raw(my_id_priv_pem)
@@ -687,8 +863,8 @@ class ChatClient:
 
         try:
             signing_priv = self.store.load_signing_private_key_pem(self.identity, self.passphrase)
-            ts = int(time.time())
-            sig_body = f"{self.identity}{ts}{plaintext}".encode("utf-8")
+            # 签名体绑定消息内容, 不绑定时钟
+            sig_body = f"{self.identity}{plaintext}".encode("utf-8")
             from cryptography.hazmat.primitives.asymmetric import ed25519
             from cryptography.hazmat.primitives import serialization
             priv = serialization.load_pem_private_key(signing_priv, password=None)
@@ -721,18 +897,43 @@ class ChatClient:
             inner = json.loads(plain.decode("utf-8"))
             text = inner.get("text", "")
             signature = inner.get("signature", "")
+            file_meta = inner.get("file")
             verified = False
             if signature:
                 try:
                     peer_signing_pub = self.store.load_signing_public_key(msg["from"])
                     sig_bytes = _b64d(signature)
                     ts = int(msg.get("timestamp", 0))
-                    sig_body = f"{msg['from']}{ts}{text}".encode("utf-8")
+                    # 新格式签名体 (内容绑定, 不绑定时钟):
+                    #   文本: {from}{text}
+                    #   文件: {from}{name}{size}{sha256}
+                    # 旧格式 (含客户端时钟) 兜底兼容, 保证与老客户端互操作。
                     from cryptography.hazmat.primitives.asymmetric import ed25519
                     from cryptography.hazmat.primitives import serialization
                     pub = serialization.load_pem_public_key(peer_signing_pub)
-                    pub.verify(sig_bytes, sig_body)
-                    verified = True
+                    bodies = []
+                    if isinstance(file_meta, dict):
+                        fname = file_meta.get("name", "")
+                        fsize = file_meta.get("size", "")
+                        fsha = file_meta.get("sha256", "")
+                        bodies.append(
+                            f"{msg['from']}{fname}{fsize}{fsha}".encode("utf-8"))
+                        bodies.append(
+                            f"{msg['from']}{ts}{fname}".encode("utf-8"))
+                    elif isinstance(inner.get("friend"), dict):
+                        faction = inner["friend"].get("action", "")
+                        bodies.append(f"{msg['from']}{faction}".encode("utf-8"))
+                        bodies.append(f"{msg['from']}{ts}{faction}".encode("utf-8"))
+                    else:
+                        bodies.append(f"{msg['from']}{text}".encode("utf-8"))
+                        bodies.append(f"{msg['from']}{ts}{text}".encode("utf-8"))
+                    for body in bodies:
+                        try:
+                            pub.verify(sig_bytes, body)
+                            verified = True
+                            break
+                        except Exception:
+                            continue
                 except Exception:
                     verified = False
             return {
@@ -743,6 +944,9 @@ class ChatClient:
                 "verified": verified,
                 "signature": signature,
                 "msg_id": msg["id"],
+                "file": file_meta if isinstance(file_meta, dict) else None,
+                "friend": inner.get("friend")
+                if isinstance(inner.get("friend"), dict) else None,
             }
         except Exception as e:
             return {"error": f"解析消息失败: {e}"}
@@ -760,7 +964,9 @@ class ChatClient:
         return results
 
     def get_history(self, peer, before_id=None, limit=50):
-        path = f"/v1/messages/history?with={peer}&limit={limit}"
+        # 不预编码: _http_request 会对 path 统一 quote (safe='/&=?' 保留 & ? =),
+        # 预编码会双重编码 (identity 含 @ 等字符时 %25 转义导致服务端解错)
+        path = f"/v1/messages/history?identity={self.identity}&with={peer}&limit={limit}"
         if before_id:
             path += f"&before={before_id}"
         resp = self._http_request("GET", path)
@@ -845,6 +1051,182 @@ class ChatClient:
                 "late_pin": info["late_pin"],
             }
         return info
+
+
+    def send_file(self, peer_identity, file_path, progress_cb=None):
+        """发送文件消息: AES-256-GCM 加密整个文件 → 上传密文拿 token →
+        inner JSON 扩展 file 字段 → 走现有 ratchet 发送链路。
+
+        成功: {"status": "sent", "msg_id": str, "type": "message"}
+        失败: {"error": "人类可读中文原因"}
+        """
+        import secrets as _secrets
+        import tempfile as _tempfile
+        import hashlib as _hashlib
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from fileclient import FileClient
+
+        if not os.path.isfile(file_path):
+            return {"error": f"文件不存在: {file_path}"}
+        # 先确认有可用会话, 避免白上传
+        state = load_session(self.identity, peer_identity, self.passphrase)
+        if state is None or state.is_expired():
+            return {"error": "无可用会话, 请先发送一条普通消息建立会话"}
+        try:
+            with open(file_path, "rb") as f:
+                plaintext = f.read()
+        except OSError as e:
+            return {"error": f"读取文件失败: {e}"}
+        name = os.path.basename(file_path)
+        size = len(plaintext)
+        sha256 = _hashlib.sha256(plaintext).hexdigest()
+
+        # a. AES-256-GCM 加密整个文件 (随机 12 字节 nonce 前置到密文)
+        file_key = _secrets.token_bytes(32)
+        nonce = _secrets.token_bytes(12)
+        try:
+            ct = AESGCM(file_key).encrypt(nonce, plaintext, None)
+        except Exception as e:
+            return {"error": f"加密文件失败: {e}"}
+        cipher_blob = nonce + ct
+
+        # 临时密文文件 (用完即删, 密钥与明文不落盘)
+        tmp_path = None
+        try:
+            fd, tmp_path = _tempfile.mkstemp(prefix="zhcrypt_upload_", suffix=".bin")
+            with os.fdopen(fd, "wb") as f:
+                f.write(cipher_blob)
+            del cipher_blob, plaintext
+
+            # b. FileClient 分块上传密文, 拿 token
+            fc = FileClient(self._server_url, self._token, self.identity)
+            result = fc.upload(tmp_path, peer_identity, progress_cb)
+            if result.get("error"):
+                return {"error": f"上传文件失败: {result['error']}"}
+            token = result["token"]
+
+            # c. Ed25519 签名 (参照 _send_ratchet_message 的容错模式, 失败留空)
+            sig_b64 = ""
+            try:
+                signing_priv = self.store.load_signing_private_key_pem(
+                    self.identity, self.passphrase)
+                # 签名体绑定文件内容指纹 (name+size+sha256), 不绑定时钟
+                sig_body = f"{self.identity}{name}{size}{sha256}".encode("utf-8")
+                from cryptography.hazmat.primitives.asymmetric import ed25519
+                from cryptography.hazmat.primitives import serialization
+                priv = serialization.load_pem_private_key(signing_priv, password=None)
+                sig_b64 = _b64(priv.sign(sig_body))
+            except Exception:
+                sig_b64 = ""
+
+            inner = json.dumps({
+                "text": "",
+                "signature": sig_b64,
+                "file": {
+                    "name": name,
+                    "size": size,
+                    "sha256": sha256,
+                    "token": token,
+                    "key": _b64(file_key),
+                },
+            }, ensure_ascii=False).encode("utf-8")
+
+            # d. 走现有 ratchet 发送链路 (send_message → save_session → 发送)
+            msg = send_message(state, inner)
+            save_session(state, self.passphrase)
+
+            if self._ws_ready:
+                err = self._send_via_ws(msg)
+            else:
+                err = self._send_via_rest(msg)
+            if err:
+                return {"error": f"发送失败: {err}"}
+            # e. 成功返回
+            return {"status": "sent", "msg_id": msg["id"], "type": "message"}
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    def download_file(self, token, dest_dir, progress_cb=None):
+        """下载文件密文到 dest_dir/<token>.bin (临时名)。
+
+        仅负责传输, 不涉及解密与本地存储: TUI 层用 LocalStore.take_file_key
+        取密钥后调用 decrypt_file 完成解密。本类刻意不依赖 localstore,
+        避免模块间循环依赖。
+        成功: {"status": "ok", "path": str, "token": str}   失败: {"error": str}
+        """
+        from fileclient import FileClient
+        fc = FileClient(self._server_url, self._token, self.identity)
+        result = fc.download(token, dest_dir, progress_cb)
+        if result.get("error"):
+            return {"error": result["error"]}
+        return {"status": "ok", "path": result["path"], "token": token}
+
+    @staticmethod
+    def decrypt_file(cipher_path, key_b64, out_name, sha256):
+        """解密 download_file 下载的密文 (nonce 前置的 AES-256-GCM)。
+
+        参数: key_b64 来自文件消息 inner JSON 的 file.key (urlsafe b64);
+        out_name 为明文输出文件名 (白名单 ^[\\w.\\-]+$, 防穿越);
+        sha256 为原文件摘要, 校验失败则拒绝写出。
+        明文写 cipher_path 同目录下。
+        成功: {"status": "ok", "path": str}   失败: {"error": str}
+        """
+        import re as _re
+        import hashlib as _hashlib
+        from core import urlsafe_b64decode as _b64d
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        if not _re.fullmatch(r"^[\w.\-]+$", out_name or ""):
+            return {"error": f"非法文件名: {out_name}"}
+        try:
+            key = _b64d(key_b64)
+        except Exception:
+            return {"error": "文件密钥格式错误"}
+        if len(key) != 32:
+            return {"error": "文件密钥长度错误"}
+        try:
+            with open(cipher_path, "rb") as f:
+                blob = f.read()
+        except OSError as e:
+            return {"error": f"读取密文失败: {e}"}
+        if len(blob) <= 12:
+            return {"error": "密文过短"}
+        nonce, ct = blob[:12], blob[12:]
+        try:
+            plain = AESGCM(key).decrypt(nonce, ct, None)
+        except Exception:
+            return {"error": "解密失败: 密文已损坏或密钥错误"}
+        digest = _hashlib.sha256(plain).hexdigest()
+        if sha256 and digest != sha256:
+            return {"error": "sha256 校验失败: 文件被篡改或不完整"}
+        out_path = os.path.join(
+            os.path.dirname(os.path.abspath(cipher_path)), out_name)
+        try:
+            with open(out_path, "wb") as f:
+                f.write(plain)
+        except OSError as e:
+            return {"error": f"写入明文失败: {e}"}
+        return {"status": "ok", "path": out_path}
+
+    def query_delivered(self, msg_ids):
+        """批量查询消息送达时间戳。
+
+        GET {server}/v1/messages/delivered?ids=a,b,c&identity=me
+        响应 {"delivered": {"a": ts, "b": null}}; 仅返回与身份相关 (发送或接收) 的消息。
+        返回 {msg_id: ts 或 None} 字典; 失败: {"error": str}
+        """
+        ids = ",".join(str(i) for i in msg_ids)
+        # 不预编码 (见 get_history 注释: _http_request 统一 quote, 防双重编码)
+        resp = self._http_request(
+            "GET", f"/v1/messages/delivered?ids={ids}&identity={self.identity}")
+        if isinstance(resp, dict) and resp.get("error"):
+            return {"error": resp["error"]}
+        delivered = resp.get("delivered", {}) if isinstance(resp, dict) else {}
+        return {str(k): v for k, v in delivered.items()}
 
 
 def init_client(identity, passphrase):

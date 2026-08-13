@@ -452,9 +452,9 @@ class ZhCryptGUI:
             messagebox.showwarning("警告", "请输入要加密的文本")
             return
         import secrets
-        words = ["山茶", "东风", "白云", "松柏", "流水", "明月", "清风", "远山",
-                 "晨露", "晚霞", "飞鸟", "落叶", "寒星", "暖阳", "翠竹", "幽兰"]
-        chosen = [secrets.choice(words) for _ in range(4)]
+        # 审计 HIGH-1: 临时口令熵从 20^4(17.3 bit) 提升到 256^6(≈48 bit)
+        from wordlist import TEMP_WORDS
+        chosen = [secrets.choice(TEMP_WORDS) for _ in range(6)]
         temp_pwd = "·".join(chosen)
         try:
             packet = encrypt_password_mode(plain, temp_pwd)
