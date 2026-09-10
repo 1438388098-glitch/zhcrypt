@@ -118,7 +118,9 @@ def _prompt_passphrase(prompt="密码: ", confirm=True):
             raise SystemExit(1)
         return line.rstrip("\r\n")
 
-    interactive = sys.stdin.isatty()
+    # R13: 打包 exe 在 Git Bash 管道下 sys.stdin.isatty() 会误报 True
+    # (走 getpass 即挂死), 以 stdin+stdout 双重判定识别非交互场景。
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
     if interactive:
         pwd = getpass.getpass(f"  {S.BOLD}▶{S.RESET} {prompt}")
     else:

@@ -1,4 +1,4 @@
-# zhcrypt 3.1.0 build script (ASCII-only comments for PS 5.1 ANSI parsing)
+﻿# zhcrypt 3.1.0 build script (ASCII-only comments for PS 5.1 ANSI parsing)
 # Usage: powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 # Output: packaging\dist\zhcrypt\  (single runtime dir, GUI + CLI entries)
 $ErrorActionPreference = "Stop"
