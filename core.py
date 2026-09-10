@@ -284,6 +284,9 @@ def decrypt_password_mode(packet: bytes, password: str) -> str:
         raise ValueError(f"数据包不是密码模式 (mode={mode}), 请使用对应的解密方法")
 
     offset = 6
+    # R7: 截断包防护 —— params(12) 的 struct.unpack 需要完整头部
+    if len(packet) < offset + 12 + SALT_SIZE + NONCE_SIZE:
+        raise ValueError("数据包过短或已损坏")
     params_end = offset + 12
     time_cost, memory_cost, parallelism = struct.unpack(">III", packet[offset:params_end])
 
@@ -488,6 +491,10 @@ def decrypt_hybrid(packet: bytes, private_key_pem: bytes,
     if mode != MODE_HYBRID:
         raise ValueError("数据包不是混合模式")
 
+    # R7: 截断包防护 —— enc_dek_len 的 unpack 需要 ≥8 字节
+    if len(packet) < 8:
+        raise ValueError("数据包过短或已损坏")
+
     offset = 6
     enc_dek_len = struct.unpack(">H", packet[offset:offset + 2])[0]
     offset += 2
@@ -531,7 +538,16 @@ def packet_to_b64(packet: bytes) -> str:
 
 
 def b64_to_packet(b64_string: str) -> bytes:
-    """将 URL-safe Base64 字符串还原为二进制加密包"""
+    """将 URL-safe Base64 字符串还原为二进制加密包。
+
+    R7: 剪贴板/消息复制常夹带换行与首尾空白, 先剥离再解码;
+    非法字符时抛出带指引的 ValueError (原先为晦涩的 binascii.Error)。
+    """
+    b64_string = "".join(b64_string.split())
+    try:
+        b64_string.encode("ascii", errors="strict")
+    except UnicodeEncodeError:
+        raise ValueError("密文含非法字符: 只接受 Base64 (URL-safe) 字符")
     padding = 4 - len(b64_string) % 4
     if padding != 4:
         b64_string += "=" * padding
@@ -579,6 +595,10 @@ def decrypt_file_password_mode(filepath: str, password: str, output_path: str = 
         packet = f.read()
 
     offset = 6
+    # R7: 截断包防护 —— 完整定长头为 params(12)+salt(32)+nonce(12),
+    # 短包会让 struct.unpack 抛 struct.error 逃过调用方的 ValueError 捕获。
+    if len(packet) < offset + 12 + SALT_SIZE + NONCE_SIZE:
+        raise ValueError("数据包过短或已损坏")
     params_end = offset + 12
     time_cost, memory_cost, parallelism = struct.unpack(">III", packet[offset:params_end])
     offset = params_end
@@ -828,9 +848,16 @@ def decrypt_hybrid_signed(
     if packet[5] != MODE_HYBRID_SIGNED:
         raise ValueError("不是签名混合模式")
 
+    # R7: flags = packet[6] 与后续 unpack 需要完整头部, 截断包统一 ValueError
+    if len(packet) < 9:
+        raise ValueError("数据包过短或已损坏")
+
     flags = packet[6]
     has_sig = bool(flags & FLAG_HAS_SIGNATURE)
 
+    # R7: 截断包防护 —— enc_dek_len 的 unpack 需要 ≥9 字节
+    if len(packet) < 9:
+        raise ValueError("数据包过短或已损坏")
     offset = 7
     enc_dek_len = struct.unpack(">H", packet[offset:offset + 2])[0]
     offset += 2
@@ -990,6 +1017,9 @@ def decrypt_pfs(
         raise ValueError("无效魔数")
     if packet[4] != VERSION_V2 or packet[5] != MODE_HYBRID_PFS:
         raise ValueError("不是 PFS 模式")
+    # R7: sender_len 的 unpack 需要 ≥10 字节 (offset 7 + 2)
+    if len(packet) < 10:
+        raise ValueError("数据包过短或已损坏")
 
     flags = packet[6]
     has_sig = bool(flags & FLAG_HAS_SIGNATURE)
@@ -1230,6 +1260,11 @@ def decrypt_file_stream(filepath, password, output_path=None, overwrite=False):
                 if len(chunk_len_data) < 4:
                     raise ValueError(f"文件截断: 块 {i} 长度数据不完整")
                 chunk_len = struct.unpack(">I", chunk_len_data)[0]
+                # R7: chunk_len 来自未认证的密文头, 恶意文件可诱导一次近
+                # 4GiB 的内存分配 (DoS)。合法块长 ≤ 默认块大小 + GCM tag,
+                # 超限直接拒绝。
+                if chunk_len > CHUNK_SIZE_DEFAULT + 16 + 32:
+                    raise ValueError(f"非法块长: {chunk_len} (超过上限)")
                 encrypted_chunk = f.read(chunk_len)
                 if len(encrypted_chunk) < chunk_len:
                     raise ValueError(f"文件截断: 块 {i} 数据不完整")
@@ -1261,20 +1296,25 @@ def encrypt_deniable(real_text: str, real_password: str,
       SALT_DURESS(32) | NONCE_DURESS(12) | DUR_LEN(4) | DUR_CT+TAG(var)
     """
     salt_real = secrets.token_bytes(SALT_SIZE)
-    key_real = derive_key(real_password, salt_real)
+    # R7: 与其它模式一致, 参数走统一钳制并写入包头 (原硬编码默认值,
+    # 用户降配 Argon2 后 deniable 仍跑 256MiB×4)
+    tc_r, mc_r, pl_r = _get_argon2_params()
+    key_real = derive_key(real_password, salt_real, time_cost=tc_r,
+                          memory_cost=mc_r, parallelism=pl_r)
     nonce_real = secrets.token_bytes(NONCE_SIZE)
     real_pt = real_text.encode("utf-8")
     aesgcm = AESGCM(key_real)
     real_ct = aesgcm.encrypt(nonce_real, real_pt, None)
 
     salt_duress = secrets.token_bytes(SALT_SIZE)
-    key_duress = derive_key(duress_password, salt_duress)
+    key_duress = derive_key(duress_password, salt_duress, time_cost=tc_r,
+                            memory_cost=mc_r, parallelism=pl_r)
     nonce_duress = secrets.token_bytes(NONCE_SIZE)
     duress_pt = duress_text.encode("utf-8")
     aesgcm2 = AESGCM(key_duress)
     duress_ct = aesgcm2.encrypt(nonce_duress, duress_pt, None)
 
-    params = struct.pack(">III", ARGON2_TIME_COST, ARGON2_MEMORY_COST, ARGON2_PARALLELISM)
+    params = struct.pack(">III", tc_r, mc_r, pl_r)
 
     packet = bytearray()
     packet.extend(MAGIC)
@@ -1312,6 +1352,9 @@ def decrypt_deniable(packet: bytes, password: str) -> dict:
         raise ValueError("不是可否认加密模式")
 
     offset = 6
+    # R7: 截断包防护 —— 定长头 params(12)+salt(32)+nonce(12)+real_len(4)
+    if len(packet) < offset + 12 + SALT_SIZE + NONCE_SIZE + 4:
+        raise ValueError("数据包过短或已损坏")
     time_cost, memory_cost, parallelism = struct.unpack(">III", packet[offset:offset + 12])
     offset += 12
 

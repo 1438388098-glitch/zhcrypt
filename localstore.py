@@ -289,7 +289,10 @@ class LocalStore:
                 from config import decrypt_bytes
                 return decrypt_bytes(blob)
             except Exception:
-                return blob
+                # R7: 解密失败不再把密文 blob 当密钥返回 (调用方会拿到
+                # 非 16/24/32 字节的无效 AES 密钥)。记录已删, 返回 None
+                # 由调用方提示该文件永久不可解。
+                return None
 
     # ---- 好友 ----
 

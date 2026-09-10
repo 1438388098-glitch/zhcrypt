@@ -8,6 +8,7 @@ zhchat Session Persistence v1.0
 import os
 import json
 import secrets
+import sys
 import time
 import hashlib
 
@@ -146,8 +147,15 @@ def load_session(my_identity, peer_identity, passphrase):
     except Exception:
         return None
 
-    d = json.loads(plain.decode("utf-8"))
-    return SessionState.from_dict(d)
+    try:
+        d = json.loads(plain.decode("utf-8"))
+        # R7: 损坏/不兼容的会话 JSON 统一转 None (此前 KeyError/ValueError
+        # 会直接炸掉 GUI/TUI 的聊天加载), 由上层按"无会话"重新握手。
+        return SessionState.from_dict(d)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError,
+            KeyError, TypeError) as e:
+        print(f"[warn] 会话文件损坏, 已忽略 ({file_path}): {e}", file=sys.stderr)
+        return None
 
 
 def delete_session(my_identity, peer_identity):
@@ -158,6 +166,9 @@ def delete_session(my_identity, peer_identity):
 
 
 def list_sessions(my_identity):
+    # R7: 身份名拼进目录路径, 必须过白名单 (与 _peer_dir 一致, 防 ../ 逃逸)
+    if not valid_identity(my_identity):
+        return []
     dir_path = os.path.join(SESSIONS_DIR, my_identity)
     if not os.path.exists(dir_path):
         return []
@@ -176,6 +187,9 @@ def list_sessions(my_identity):
 
 
 def cleanup_expired_sessions(my_identity):
+    # R7: 同 list_sessions —— 白名单校验防目录逃逸删除
+    if not valid_identity(my_identity):
+        return 0
     cutoff = time.time() - SESSION_EXPIRE_DAYS * 86400
     dir_path = os.path.join(SESSIONS_DIR, my_identity)
     if not os.path.exists(dir_path):

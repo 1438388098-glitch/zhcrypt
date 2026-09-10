@@ -16,7 +16,8 @@ a = Analysis(
     excludes=[
         'setuptools', 'pkg_resources', 'wheel', 'distutils',
         'bcrypt', 'tkinter', 'plyer', 'ctypes',
-        'multiprocessing', 'decimal', 'xml', 'sqlite3',
+        # R7: sqlite3 不能排除 —— shell 子命令经 tui/localstore 依赖它
+        'multiprocessing', 'decimal', 'xml',
         'pydoc', 'unittest', 'doctest', 'pdb', 'lib2to3',
         'ensurepip', 'pip',
     ],

@@ -9,3 +9,7 @@ Flask>=2.0
 gunicorn>=20.0
 websockets>=9.0
 websocket-client>=1.0
+# R7 补齐: zhcrypt shell (tui.py) 依赖 textual, GUI 通知可选依赖 plyer
+# —— 此前按本清单安装后 shell 必报 TUI 依赖缺失
+textual>=0.60
+plyer>=2.1

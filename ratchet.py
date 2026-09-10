@@ -183,6 +183,17 @@ class SessionState:
 
     @classmethod
     def from_dict(cls, d):
+        """反序列化; R7: 缺失/损坏字段抛 ValueError (由 load_session 统一
+        捕获转 None), 不再让 KeyError/TypeError 直接炸穿调用方。"""
+        if not isinstance(d, dict):
+            raise ValueError("会话数据不是对象")
+        if d.get("v") != 1:
+            raise ValueError(f"不支持的会话版本: {d.get('v')}")
+        for k in ("my_identity", "peer_identity", "root_key", "send_chain_key",
+                  "recv_chain_key", "our_ratchet_priv", "our_ratchet_pub",
+                  "their_ratchet_pub"):
+            if k not in d:
+                raise ValueError(f"会话数据缺少字段: {k}")
         s = cls(
             session_id=d.get("session_id", ""),
             my_identity=d["my_identity"],
@@ -200,7 +211,10 @@ class SessionState:
         )
         s.skipped_keys = {}
         for fp, fp_dict in d.get("skipped_keys", {}).items():
-            s.skipped_keys[fp] = {int(n): _b64d(mk) for n, mk in fp_dict.items()}
+            try:
+                s.skipped_keys[fp] = {int(n): _b64d(mk) for n, mk in fp_dict.items()}
+            except (ValueError, TypeError, AttributeError):
+                raise ValueError(f"会话乱序密钥数据损坏: {fp}")
         s.seen_message_ids = d.get("seen_message_ids", [])[-MAX_SEEN_IDS:]
         s.created_at = d.get("created_at", time.time())
         s.last_active = d.get("last_active", time.time())
