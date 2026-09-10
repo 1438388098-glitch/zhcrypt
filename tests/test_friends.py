@@ -165,7 +165,12 @@ def test_ingest_friend_accept():
                     "verified": True, "msg_id": "m2",
                     "friend": {"action": "accept"}}
 
+    # R11 门禁: 仅 requested → confirmed; 无未决请求的 accept 被忽略
     tui._ingest_server_message(app, FC(), store, {"id": "m2", "from": "bob"})
+    assert store.friend_status("bob") is None
+
+    store.upsert_friend("bob", "requested")
+    tui._ingest_server_message(app, FC(), store, {"id": "m3", "from": "bob"})
     assert store.friend_status("bob") == "confirmed"
 
 

@@ -2,6 +2,8 @@
 # 安装: pip install -r requirements-server.txt
 Flask>=2.0
 gunicorn>=20.0
-websockets>=9.0
+# R11: websockets 11 移除 handler(path) 二参签名, 宽约束会在旧环境装出
+# 与 chat_server 不兼容的版本; 上界防未来大版本破坏。
+websockets>=11,<18
 cryptography>=3.0
 argon2-cffi>=21.1

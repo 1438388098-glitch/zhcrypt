@@ -109,7 +109,20 @@ def _bar(score, total=5, length=20):
     return f"{bar}  {score}/{total}"
 
 def _prompt_passphrase(prompt="密码: ", confirm=True):
-    pwd = getpass.getpass(f"  {S.BOLD}▶{S.RESET} {prompt}")
+    # R11: 非交互管道下 Windows getpass 等待控制台按键会无限挂起;
+    # 检测非 tty 时改读 stdin 行 (脚本场景接受回显)。
+    def _read_line():
+        line = sys.stdin.readline()
+        if not line:
+            _err("stdin 已关闭, 无法读取密码")
+            raise SystemExit(1)
+        return line.rstrip("\r\n")
+
+    interactive = sys.stdin.isatty()
+    if interactive:
+        pwd = getpass.getpass(f"  {S.BOLD}▶{S.RESET} {prompt}")
+    else:
+        pwd = _read_line()
     if not pwd:
         _err("密码不能为空")
     from strength import get_strength
@@ -122,7 +135,7 @@ def _prompt_passphrase(prompt="密码: ", confirm=True):
     if s["level"] == "weak" and len(pwd.encode("utf-8")) < 12:
         _warn("密码过弱, 建议使用更长/更复杂的密码")
     if confirm:
-        pwd2 = getpass.getpass(f"  {S.BOLD}▶{S.RESET} 确认密码: ")
+        pwd2 = getpass.getpass(f"  {S.BOLD}▶{S.RESET} 确认密码: ") if interactive else _read_line()
         if pwd != pwd2:
             _err("两次输入的密码不一致")
     return pwd
@@ -137,6 +150,10 @@ class Spinner:
         self._thread = None
 
     def start(self):
+        # R11: 非 tty (管道/重定向) 下 \r 动画只会刷屏污染输出, 跳过动画
+        if not sys.stdout.isatty():
+            self._running = False
+            return self
         self._running = True
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
@@ -156,6 +173,11 @@ class Spinner:
             self._thread.join()
             label = f"{S.GREEN}完成{S.RESET}" if ok else f"{S.RED}失败{S.RESET}"
             sys.stdout.write(f"\r  {label}  {self.msg}  \n")
+            sys.stdout.flush()
+        elif not sys.stdout.isatty():
+            # R11: 非 tty 退化路径, 仅输出一行结论
+            label = f"{S.GREEN}完成{S.RESET}" if ok else f"{S.RED}失败{S.RESET}"
+            sys.stdout.write(f"  {label}  {self.msg}\n")
             sys.stdout.flush()
 
     def __enter__(self):
@@ -637,17 +659,33 @@ def cmd_restore(args):
             data = f.read()
         if data[:4] != MAGIC:
             _err("备份文件格式错误")
-        nonce = data[6:18]
-        encrypted_pem = data[18:]
+        nonce = data[5:17]
+        encrypted_pem = data[17:]
         aesgcm = AESGCM(encrypt_key)
         key_pem = aesgcm.decrypt(nonce, encrypted_pem, None)
         key_path = os.path.join(store.key_dir, f"{identity}.key")
+        # R11 P0 修复(续): 恢复出的 PEM 必须重新以用户口令 Argon2id 包裹
+        # 落盘 —— 原实现把裸 PEM 直接写进 .key, 与 _unwrap_key 的包裹格式
+        # 不符, 恢复后一切解密仍 InvalidTag (备份功能整体不可用的第二层)。
+        new_pwd = _prompt_passphrase(
+            f"为恢复的身份 '{identity}' 设置新密码: ", confirm=True)
+        from keys import _wrap_key_data, _restrict_private
+        wrapped = _wrap_key_data(new_pwd, key_pem)
         with open(key_path, "wb") as f:
-            f.write(key_pem)
+            f.write(wrapped)
+        try:
+            _restrict_private(key_path)
+        except Exception:
+            pass
         _ok("私钥已恢复!")
         _kv("路径", key_path)
     except Exception as e:
-        _err(f"恢复失败: {e}")
+        # R11: InvalidTag 等 GCM 异常的 str() 为空串, 统一补类型名;
+        # 认证失败专译为可读文案 (此前输出 "恢复失败: " 空消息)
+        detail = str(e) or type(e).__name__
+        if type(e).__name__ == "InvalidTag":
+            detail = "认证失败 (份额/密码错误或备份文件损坏)"
+        _err(f"恢复失败: {detail}")
 
 def cmd_strength(args):
     from strength import get_strength

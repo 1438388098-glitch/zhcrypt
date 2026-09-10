@@ -247,12 +247,19 @@ class FileClient:
             m = re.match(r"bytes\s+(\d+)-", content_range)
             if m and int(m.group(1)) != local_size:
                 return {"error": "服务端 Range 响应偏移不匹配, 放弃续传"}
-            with open(dest, "ab") as f:
-                f.write(body)
+            try:
+                with open(dest, "ab") as f:
+                    f.write(body)
+            except OSError as e:
+                # R11: 磁盘满/权限错误此前裸穿透, 违反 {"error": 中文} 契约
+                return {"error": f"写盘失败: {e}"}
         else:
             # 200 整文件: 覆盖写
-            with open(dest, "wb") as f:
-                f.write(body)
+            try:
+                with open(dest, "wb") as f:
+                    f.write(body)
+            except OSError as e:
+                return {"error": f"写盘失败: {e}"}
             local_size = 0
             if status == 206:
                 local_size = 0  # 无 Range 请求但返回 206, 以整文件计

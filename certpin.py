@@ -31,8 +31,17 @@ def compute_cert_pin(der_cert):
 
 
 def verify_cert_pin(der_cert, expected_pin):
-    """校验服务端证书指纹是否等于预期 pin (恒定时间比较, 防时序)。"""
-    if not expected_pin:
+    """校验服务端证书指纹是否等于预期 pin (恒定时间比较, 防时序)。
+
+    R11: 非 ASCII pin 会让 hmac.compare_digest 抛 TypeError (调用侧不在
+    try 内, 会被泛化成"连接错误"), 这里统一做输入防线后返回 False。
+    """
+    if not der_cert or not expected_pin or not isinstance(expected_pin, str):
+        return False
+    expected_pin = expected_pin.strip()
+    try:
+        expected_pin.encode("ascii")
+    except UnicodeEncodeError:
         return False
     actual = compute_cert_pin(der_cert)
     return hmac.compare_digest(actual, expected_pin)

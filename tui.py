@@ -470,11 +470,17 @@ def _ingest_server_message(app, client, store, msg):
                     f"👋 {peer} 请求添加你为好友 — 输入 /accept {peer} 接受"))
             # confirmed 时静默忽略重复请求
         elif action == "accept":
+            # R11: 仅当本地确有未决请求 (requested) 才确认 —— 此前收到任意
+            # accept 即置 confirmed, 恶意/垃圾对端可单方面"成为好友"。
             try:
-                store.upsert_friend(peer, "confirmed", ts)
+                if store.friend_status(peer) == "requested":
+                    store.upsert_friend(peer, "confirmed", ts)
+                    app.post_message(NotifyToast(f"✅ {peer} 接受了你的好友请求"))
+                else:
+                    app.post_message(NotifyToast(
+                        f"⚠️ 已忽略 {peer} 的 accept (本地无对应好友请求)"))
             except Exception:
                 pass
-            app.post_message(NotifyToast(f"✅ {peer} 接受了你的好友请求"))
         elif action == "remove":
             try:
                 store.upsert_friend(peer, "removed", ts)

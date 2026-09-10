@@ -27,7 +27,7 @@ from ratchet import (
     pem_priv_to_raw, raw_to_pem_pub, _b64, _b64d, KEY_SIZE, KDF_CK,
     x3dh_reply_msg,
 )
-from session import save_session, load_session, list_sessions, delete_session
+from session import save_session, load_session, list_sessions, delete_session, session_lock
 
 INBOUND = queue.Queue()
 OUTBOUND = queue.Queue()
@@ -1141,8 +1141,16 @@ class ChatClient:
             }, ensure_ascii=False).encode("utf-8")
 
             # d. 走现有 ratchet 发送链路 (send_message → save_session → 发送)
-            msg = send_message(state, inner)
-            save_session(state, self.passphrase)
+            # R11: 与 send_chat_message 一致, load→send→save 全程持会话锁 ——
+            # 上传耗时长, 期间对端消息推进 ratchet 落盘后, 旧 state 覆写会
+            # 导致双方 ratchet 失步 (C1 竞态在文件路径的翻版)。
+            with session_lock(self.identity, peer_identity):
+                state = load_session(self.identity, peer_identity, self.passphrase)
+                if state is None or state.is_expired():
+                    return {"error": "上传完成但会话已失效, 文件未发送; "
+                                     "请重新建立会话后再发一次"}
+                msg = send_message(state, inner)
+                save_session(state, self.passphrase)
 
             if self._ws_ready:
                 err = self._send_via_ws(msg)
