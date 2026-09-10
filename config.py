@@ -177,7 +177,12 @@ def _load_device_key():
               f"将无法解密, 请重新执行 zhcrypt set-server 配置 token。",
               file=sys.stderr)
     key = secrets.token_bytes(32)
-    fd = os.open(DEVICE_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # R15: Windows 上 os.open 缺 O_BINARY 时 CRT 以文本模式写入, 随机字节
+    # 中的 0x0A 会被翻译成 0x0D 0x0A —— 32 字节密钥一旦含 \n (约 12% 概率)
+    # 落盘即变长, 下次读取被判"损坏"并反复重新生成, token 永久失配。
+    fd = os.open(DEVICE_KEY_PATH,
+                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                 0o600)
     try:
         os.write(fd, key)
     finally:

@@ -26,6 +26,7 @@ collect_ignore = [
     "test_round1_integration.py",
     "test_sync_e2e.py",
     "test_first_run.py",       # 关闭 stdio, 与 pytest 捕获不兼容
+    "e2e_local_smoke.py",      # R14: 真实双服务进程 E2E, 单独手工运行
     "run_core_tests.py",
     "security_audit.py",       # 攻击模拟平台 (非测试)
 ]
