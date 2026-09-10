@@ -359,8 +359,12 @@ class KeyStore:
                 meta_path = os.path.join(self.key_dir, f"{identity}.meta")
                 meta = {}
                 if os.path.exists(meta_path):
-                    with open(meta_path, "r", encoding="utf-8") as mf:
-                        meta = json.load(mf)
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as mf:
+                            meta = json.load(mf)
+                    except (OSError, ValueError):
+                        # 损坏/非法的 meta 文件不应让身份列举整体失败 (R1 修复)
+                        meta = {}
                 pub_path = os.path.join(self.key_dir, fname)
                 if os.path.exists(pub_path):
                     with open(pub_path, "rb") as pf:

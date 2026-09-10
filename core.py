@@ -70,23 +70,37 @@ def _clear_bytes(data: bytearray):
 def _get_argon2_params():
     """从配置文件读取 Argon2id 参数 (如果可用)
 
-    安全钳制 (加密审查 4.9): 限制 memory_cost <= 2GiB、time_cost <= 100,
-    防止配置误写导致解密时 OOM。
+    安全钳制与 derive_key 完全一致 (time ∈ [1,16]、memory ∈ [8MiB,2GiB]、
+    parallelism ∈ [1,16]、memory×parallelism ≤ 2GiB)。加密端必须把解密端
+    (derive_key) 会采用的参数写进密文头, 两端钳制规则漂移会导致配置越界时
+    写出的密文在解密端按默认参数派生而永远解不开 (R1 修复, 原 time 上限 100
+    且无 parallelism/乘积钳制)。
     """
+    tc, mc, pl = ARGON2_TIME_COST, ARGON2_MEMORY_COST, ARGON2_PARALLELISM
     try:
         from config import load
         cfg = load()
         a = cfg.get("argon2id", {})
-        tc = int(a.get("time_cost", ARGON2_TIME_COST))
-        mc = int(a.get("memory_cost", ARGON2_MEMORY_COST))
-        pl = int(a.get("parallelism", ARGON2_PARALLELISM))
-        if mc > 2 * 1024 * 1024:
-            mc = 2 * 1024 * 1024
-        if tc > 100:
-            tc = 100
-        return (tc, mc, pl)
+        tc = int(a.get("time_cost", tc))
+        mc = int(a.get("memory_cost", mc))
+        pl = int(a.get("parallelism", pl))
     except Exception:
-        return (ARGON2_TIME_COST, ARGON2_MEMORY_COST, ARGON2_PARALLELISM)
+        pass
+    try:
+        if not (1 <= tc <= 16):
+            tc = ARGON2_TIME_COST
+        if not (8 * 1024 <= mc <= 2 * 1024 * 1024):
+            mc = ARGON2_MEMORY_COST
+        if not (1 <= pl <= 16):
+            pl = ARGON2_PARALLELISM
+        max_total = 2 * 1024 * 1024  # 2 GiB (单位 KiB)
+        if mc * pl > max_total:
+            pl = max(1, max_total // mc)
+    except (TypeError, ValueError):
+        tc = ARGON2_TIME_COST
+        mc = ARGON2_MEMORY_COST
+        pl = ARGON2_PARALLELISM
+    return (tc, mc, pl)
 
 
 def derive_key(password: str, salt: bytes,
@@ -1331,8 +1345,3 @@ def decrypt_deniable(packet: bytes, password: str) -> dict:
         return {"text": pt.decode("utf-8"), "type": "duress"}
     except Exception:
         return {"text": None, "type": None, "error": "密码错误或数据损坏"}
-
-
-class DecryptionError(Exception):
-    """解密失败异常"""
-    pass

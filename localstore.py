@@ -12,6 +12,7 @@ localstore.py — 客户端本地缓存 (Agent-C 产出)
 
 import os
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 
@@ -253,18 +254,23 @@ class LocalStore:
 
     # ---- 文件密钥 ----
 
-    def save_file_key(self, msg_id, key: bytes) -> None:
+    def save_file_key(self, msg_id, key: bytes) -> bool:
         # 审计 M4: 文件 AES 密钥不再明文落盘, 用本机 device.key 加密后存储。
+        # R1 加固: 加密不可用时不再回退明文落盘 (本机被获取即泄露全部文件密钥),
+        # 放弃存储并返回 False —— 接收方将无法解密该文件, 但不引入明文密钥落盘。
         try:
             from config import encrypt_bytes
             stored = encrypt_bytes(key)
-        except Exception:
-            stored = key  # 加密不可用时回退 (不应发生, 但避免丢密钥)
+        except Exception as exc:
+            print(f"[warn] file key 加密失败, 已放弃存储 (msg_id={msg_id}): {exc}",
+                  file=sys.stderr)
+            return False
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO file_keys(msg_id, key) VALUES (?, ?)",
                 (msg_id, stored),
             )
+            return True
 
     def take_file_key(self, msg_id) -> bytes | None:
         """取出即删 (同一连接内 SELECT 后 DELETE, 原子); 无记录返回 None。"""
@@ -329,9 +335,12 @@ class LocalStore:
     def search(self, kw, limit=50) -> list:
         """LIKE '%kw%' 匹配 body, 按 ts 降序返回。"""
         with self._conn() as conn:
+            # R1 修复: 转义 LIKE 通配符, 用户输入中的 %/_ 按字面匹配
+            escaped = (str(kw).replace("\\", "\\\\")
+                       .replace("%", "\\%").replace("_", "\\_"))
             rows = conn.execute(
                 "SELECT peer, msg_id, from_peer, msg_type, body, status, verified, ts "
-                "FROM local_messages WHERE body LIKE ? ORDER BY ts DESC LIMIT ?",
-                (f"%{kw}%", limit),
+                "FROM local_messages WHERE body LIKE ? ESCAPE '\\' ORDER BY ts DESC LIMIT ?",
+                (f"%{escaped}%", limit),
             ).fetchall()
             return [dict(r) for r in rows]

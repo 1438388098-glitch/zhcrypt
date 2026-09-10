@@ -138,6 +138,8 @@ def _purge_stale_upload_sessions():
              if now - s["mtime"] > UPLOAD_SESSION_TIMEOUT]
     for t in stale:
         s = _upload_sessions.pop(t, None)
+        # 同步释放互斥锁, 否则长期运行下 _upload_locks 只增不减 (R1 修复)
+        _upload_locks.pop(t, None)
         if s and os.path.isfile(s["path"]):
             try:
                 os.remove(s["path"])
@@ -434,13 +436,20 @@ def fetch_prekey_meta(identity):
 @require_auth
 def upload_batch(identity):
     """批量上传 one-time prekeys"""
+    if not valid_identity(identity):
+        return jsonify({"error": "invalid identity"}), 400
     data = request.get_json(force=True)
     if not data or "one_time_prekeys" not in data:
         return jsonify({"error": "missing one_time_prekeys"}), 400
+    otpks = data["one_time_prekeys"]
+    if not isinstance(otpks, list) or not otpks:
+        return jsonify({"error": "one_time_prekeys must be a non-empty list"}), 400
+    if len(otpks) > MAX_ONE_TIME_PREKEYS:
+        return jsonify({"error": f"too many one_time_prekeys (max {MAX_ONE_TIME_PREKEYS})"}), 400
 
     db = get_db()
     count = 0
-    for otpk in data["one_time_prekeys"]:
+    for otpk in otpks:
         db.execute("""
             INSERT INTO prekeys (identity, key_type, prekey_data, fingerprint, created_at)
             VALUES (?, 'one_time', ?, ?, ?)
@@ -463,6 +472,8 @@ def upload_batch(identity):
 @require_auth
 def clear_prekeys(identity):
     """清理某个身份的所有 prekey"""
+    if not valid_identity(identity):
+        return jsonify({"error": "invalid identity"}), 400
     db = get_db()
     db.execute("DELETE FROM prekeys WHERE identity = ?", (identity,))
     db.execute("DELETE FROM identities WHERE identity = ?", (identity,))
@@ -492,6 +503,8 @@ def stats():
 @require_auth
 def remaining_prekeys(identity):
     """查看某个身份剩余的 one-time prekey 数量"""
+    if not valid_identity(identity):
+        return jsonify({"error": "invalid identity"}), 400
     db = get_db()
     count = db.execute("""
         SELECT COUNT(*) as cnt FROM prekeys
@@ -576,6 +589,9 @@ def message_send():
     # 若为路径穿越字符串会触发接收方客户端路径拼接 (审计 H4)。
     if not valid_identity(identity):
         return jsonify({"error": "invalid identity"}), 400
+    # 收件人同样过白名单: to 会作为 recipient 写库并成为对端拉取键 (R1 修复)
+    if not valid_identity(data["to"]):
+        return jsonify({"error": "invalid recipient"}), 400
     sender = identity
 
     if not _check_message_rate(_client_ip()):
@@ -643,8 +659,12 @@ def message_pending():
 def message_ack():
     data = request.get_json(force=True)
     msg_ids = data.get("msg_ids", [])
-    if not msg_ids:
+    if not isinstance(msg_ids, list) or not msg_ids:
         return jsonify({"error": "msg_ids required"}), 400
+    if len(msg_ids) > 200:
+        return jsonify({"error": "too many msg_ids (max 200)"}), 400
+    if not all(isinstance(m, str) and 0 < len(m) <= 128 for m in msg_ids):
+        return jsonify({"error": "invalid msg_id"}), 400
 
     db = get_db()
     db.executemany(
@@ -829,7 +849,8 @@ def file_upload():
             return jsonify({"error": "upload exceeds total size"}), 400
 
         # 全部块接收完毕: 原子落盘 + 记录元数据
-        os.rename(part_path, final_path)
+        # os.replace: Windows 上目标已存在时原子覆盖; os.rename 会抛 FileExistsError (R1 修复)
+        os.replace(part_path, final_path)
         _upload_sessions.pop(upload_token, None)
         _upload_locks.pop(upload_token, None)
         db = get_db()
