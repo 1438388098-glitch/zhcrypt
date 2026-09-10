@@ -2083,18 +2083,21 @@ class ZhCryptGUI:
 
         self._set_status(f"正在发送 {fname} ({fsize//1024}KB)...", 0)
 
-        try:
-            import base64, secrets
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        # R12: 读取+加密移入后台线程, 大文件不再冻结 UI; 网络与 UI 交互留在主线程
+        def _work():
+            import base64 as _b64mod
+            import secrets as _secrets
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
             with open(path, "rb") as f:
                 raw = f.read()
-            file_key = secrets.token_bytes(32)
-            nonce = secrets.token_bytes(12)
-            aesgcm = AESGCM(file_key)
-            encrypted = aesgcm.encrypt(nonce, raw, None)
+            file_key = _secrets.token_bytes(32)
+            nonce = _secrets.token_bytes(12)
+            encrypted = _AESGCM(file_key).encrypt(nonce, raw, None)
             payload = nonce + encrypted
-            file_b64 = base64.b64encode(payload).decode("ascii")
+            return (_b64mod.b64encode(payload).decode("ascii"),
+                    _b64mod.b64encode(file_key).decode("ascii"))
 
+        def _done(file_b64, key_b64):
             if fsize > 500 * 1024:
                 if self._chat_client.ws_ready and self._chat_client.ws:
                     # 先上传密文到服务器, 等 file_upload_ack 拿到 token 后再发 [FILE] meta
@@ -2105,7 +2108,7 @@ class ZhCryptGUI:
                     self._pending_file_upload = {
                         "fname": fname,
                         "fsize": fsize,
-                        "key_b64": base64.b64encode(file_key).decode("ascii"),
+                        "key_b64": key_b64,
                     }
                     self._set_status(f"正在上传 {fname} ...", 0)
                     tag = f"uploading_{int(time.time()*1000)}"
@@ -2125,10 +2128,7 @@ class ZhCryptGUI:
                 else:
                     messagebox.showerror("错误", "WebSocket 未连接，无法上传大文件")
                     return
-            else:
-                key_b64 = base64.b64encode(file_key).decode("ascii")
-                meta = f"[FILE]{fname}|{fsize}|{key_b64}|{file_b64}"
-
+            meta = f"[FILE]{fname}|{fsize}|{key_b64}|{file_b64}"
             self._display_chat_message({
                 "from": self.chat_identity_var.get(),
                 "timestamp": time.time(),
@@ -2139,9 +2139,13 @@ class ZhCryptGUI:
             if result.get("error"):
                 self._append_chat_msg("error", f"文件发送失败: {result['error']}")
             self._set_status(f"文件已发送: {fname}", 4000)
-        except Exception as e:
+
+        def _error(e):
             self._append_chat_msg("error", f"文件发送失败: {e}")
             self._set_status("文件发送失败", 3000)
+
+        self._run_bg(_work, _done, on_error=_error,
+                     busy_msg=f"正在加密 {fname} ...")
 
     def _on_clear_chat(self):
         self.chat_msg_display.config(state=tk.NORMAL)

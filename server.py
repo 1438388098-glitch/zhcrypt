@@ -795,9 +795,16 @@ def message_prune():
 @app.route("/v1/identities", methods=["GET"])
 @require_auth
 def list_identities():
+    # R12: 分页上限 —— 全量身份列表在大库时响应膨胀 (默认 500, 上限 1000)
+    try:
+        limit = min(int(request.args.get("limit", "500")), 1000)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid limit"}), 400
     db = get_db()
     rows = db.execute(
-        "SELECT identity, fingerprint, last_seen FROM identities ORDER BY last_seen DESC"
+        "SELECT identity, fingerprint, last_seen FROM identities "
+        "ORDER BY last_seen DESC LIMIT ?",
+        (limit,),
     ).fetchall()
     idents = [{
         "identity": r["identity"],

@@ -65,9 +65,12 @@ def _friendly_conn_error(e):
 
 
 class ChatClient:
-    def __init__(self, identity, passphrase):
+    def __init__(self, identity, passphrase, inbound_queue=None):
         self.identity = identity
         self.passphrase = passphrase
+        # R12: 事件队列可按实例隔离 (多账号/测试同进程多 client 不再串扰);
+        # 默认仍用模块级 INBOUND, 保持 GUI/TUI 既有轮询兼容。
+        self.inbound = inbound_queue if inbound_queue is not None else INBOUND
         self.store = KeyStore()
         self.ws = None
         self.ws_thread = None
@@ -121,14 +124,18 @@ class ChatClient:
         encoded_path = urllib.parse.quote(path, safe='/&=?')
         url = f"{base}{encoded_path}"
 
-        # 审计 #18: REST 同样做证书固定 (prekey 下载是 MITM 主要目标)
-        pin = self._get_cert_pin()
-        if pin and self._server_url.startswith("https://"):
-            self._verify_rest_cert_pin(pin)
-
         data = None
         if body:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+        # 审计 #18: REST 同样做证书固定 (prekey 下载是 MITM 主要目标)
+        pin = self._get_cert_pin()
+        https = self._server_url.startswith("https://")
+        if pin and https:
+            # R12: 同一条 TLS 连接上先验 pin 再发请求, 消除旧实现
+            # 「另起连接验 pin → 真实连接发请求」的 TOCTOU (选择性劫持面),
+            # 同时省去每请求一次的额外握手。
+            return self._pinned_http_request(method, url, data, timeout, pin)
 
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self._token}")
@@ -150,6 +157,47 @@ class ChatClient:
             return {"error": f"HTTP {e.code}: {body_text or e.reason}"}
         except Exception as e:
             return {"error": str(e)}
+
+    def _pinned_http_request(self, method, url, data, timeout, pin):
+        """带证书固定的单连接 HTTP 请求 (R12)。
+
+        TLS 握手完成后、发送任何请求字节之前, 在同一条连接上校验叶子
+        证书 SPKI 指纹; 不匹配即拒绝 —— 固定检查与请求不可被拆分劫持。
+        """
+        import http.client
+        import ssl
+        import json as _json
+        from urllib.parse import urlparse
+        from certpin import verify_cert_pin
+
+        p = urlparse(url)
+        target = p.path + (f"?{p.query}" if p.query else "")
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(p.hostname, p.port or 443,
+                                           timeout=timeout, context=ctx)
+        try:
+            conn.connect()
+            der = conn.sock.getpeercert(binary_form=True)
+            if not verify_cert_pin(der, pin):
+                return {"error": "证书固定校验失败: 服务器证书与 pin 不符 (疑似中间人)"}
+            headers = {
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+                "User-Agent": "zhcrypt-client/3.2",
+            }
+            conn.request(method, target, body=data, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8")
+            if resp.status >= 400:
+                return {"error": f"HTTP {resp.status}: {raw[:200]}"}
+            return _json.loads(raw)
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _host_port_from_url(self, url):
         from urllib.parse import urlparse
@@ -184,7 +232,7 @@ class ChatClient:
                 self._ws_ready = True
                 self._connected = True
                 reported_error = False
-                INBOUND.put({"action": "status", "connected": True})
+                self.inbound.put({"action": "status", "connected": True})
 
                 # 3s socket timeout keeps connections alive while allowing
                 # the send queue to be processed frequently
@@ -202,7 +250,7 @@ class ChatClient:
                             data = _json.loads(raw)
                         except _json.JSONDecodeError:
                             continue
-                        INBOUND.put({"action": "server_message", "data": data})
+                        self.inbound.put({"action": "server_message", "data": data})
                     except (_socket.timeout, _WSTE):
                         pass
                     except _WSCE:
@@ -244,12 +292,12 @@ class ChatClient:
             except Exception as e:
                 if not reported_error:
                     # M17 修复: 常见异常映射为中文短句, 不把 traceback 糊给用户
-                    INBOUND.put({"action": "error", "message": _friendly_conn_error(e)})
+                    self.inbound.put({"action": "error", "message": _friendly_conn_error(e)})
                     reported_error = True
 
             self._connected = False
             self._ws_ready = False
-            INBOUND.put({"action": "status", "connected": False})
+            self.inbound.put({"action": "status", "connected": False})
 
             if self._running:
                 time.sleep(min(backoff, self._max_reconnect_delay))
@@ -865,41 +913,8 @@ class ChatClient:
 
         return {"error": "X3DH 解密失败"}
 
-    def send_x3dh_reply(self, peer_identity, plaintext):
-        state = load_session(self.identity, peer_identity, self.passphrase)
-        if state is None:
-            return {"error": "无会话状态"}
-
-        try:
-            signing_priv = self.store.load_signing_private_key_pem(self.identity, self.passphrase)
-            # 签名体绑定消息内容, 不绑定时钟
-            sig_body = f"{self.identity}{plaintext}".encode("utf-8")
-            from cryptography.hazmat.primitives.asymmetric import ed25519
-            from cryptography.hazmat.primitives import serialization
-            priv = serialization.load_pem_private_key(signing_priv, password=None)
-            sig = priv.sign(sig_body)
-            sig_b64 = _b64(sig)
-        except Exception:
-            sig_b64 = ""
-
-        inner = json.dumps({
-            "text": plaintext,
-            "signature": sig_b64,
-        }, ensure_ascii=False).encode("utf-8")
-
-        msg = send_message(state, inner)
-        msg["type"] = "x3dh_reply"
-        msg["payload"]["one_time_prekey_id"] = None
-
-        save_session(state, self.passphrase)
-
-        if self._ws_ready:
-            err = self._send_via_ws(msg)
-        else:
-            err = self._send_via_rest(msg)
-        if err:
-            return {"error": f"发送失败: {err}"}
-        return {"status": "sent", "msg_id": msg["id"], "type": "x3dh_reply"}
+    # R12: 移除无调用方的 send_x3dh_reply (遗留 X3DH 应答路径, 内部
+    # 缺 session_lock, 一旦被复用会复发 C1 竞态; 实际应答见 x3dh_reply 接收侧)
 
     def _parse_decrypted(self, plain, msg):
         try:
@@ -993,7 +1008,7 @@ class ChatClient:
         items = []
         while True:
             try:
-                items.append(INBOUND.get_nowait())
+                items.append(self.inbound.get_nowait())
             except queue.Empty:
                 break
         return items
@@ -1158,8 +1173,9 @@ class ChatClient:
                 err = self._send_via_rest(msg)
             if err:
                 return {"error": f"发送失败: {err}"}
-            # e. 成功返回
-            return {"status": "sent", "msg_id": msg["id"], "type": "message"}
+            # e. 成功返回 (R12: 带上 sha256, 调用方免于第三次全文件重读)
+            return {"status": "sent", "msg_id": msg["id"], "type": "message",
+                    "sha256": sha256}
         finally:
             if tmp_path:
                 try:

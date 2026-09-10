@@ -41,6 +41,16 @@ def _char_set_size(password):
 
 
 def estimate_entropy(password: str) -> float:
+    # R12: 「词·词·词」形词表口令按词表熵计算 —— 字符熵会把 6 词临时口令
+    # 高估到 200+ bits (实际 256^6 ≈ 48 bits)。
+    try:
+        from wordlist import TEMP_WORDS
+        parts = password.split("·")
+        if len(parts) >= 3 and all(p in TEMP_WORDS for p in parts):
+            return math.log2(len(TEMP_WORDS)) * len(parts)
+    except Exception:
+        pass
+
     charset = _char_set_size(password)
     entropy = math.log2(charset) * len(password)
 

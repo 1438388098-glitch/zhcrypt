@@ -42,6 +42,7 @@ def _atomic_write_json(path, data):
     GUI 后台线程化后, .meta/.otpkeys/.spk 的写方与加载路径存在并发窗口,
     半写文件会让 json.load 直接崩; 复制 session.py 的原子写范式。
     """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)  # R12: 延迟创建
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -163,6 +164,11 @@ class KeyStore:
 
     def __init__(self, key_dir: str = None):
         self.key_dir = key_dir or _DEFAULT_KEY_DIR
+        # R12: 延迟创建 —— 只读命令 (list/info) 不再凭空生成 ~/.zhcrypt/keys;
+        # 写路径方法经 self._ensure_dir() 创建。
+
+    def _ensure_dir(self):
+        """按需创建密钥目录 (R12 延迟创建)。"""
         os.makedirs(self.key_dir, exist_ok=True)
 
     @_validate_identity_arg
@@ -180,6 +186,7 @@ class KeyStore:
           <identity>.x25519.pub - X25519 公钥 (PEM)
           <identity>.meta       - 元数据 JSON
         """
+        self._ensure_dir()  # R12: 延迟创建
         public_path = os.path.join(self.key_dir, f"{identity}.pub")
         private_path = os.path.join(self.key_dir, f"{identity}.key")
         sig_priv_path = os.path.join(self.key_dir, f"{identity}.ed25519")
@@ -313,6 +320,7 @@ class KeyStore:
     @_validate_identity_arg
     def ensure_kem_keys(self, identity: str, passphrase: str) -> bool:
         """如果身份缺少 X25519 密钥对, 自动生成 (用于兼容旧版身份)"""
+        self._ensure_dir()
         pub_path = os.path.join(self.key_dir, f"{identity}.x25519.pub")
         priv_path = os.path.join(self.key_dir, f"{identity}.x25519")
         if os.path.exists(pub_path) and os.path.exists(priv_path):
@@ -364,7 +372,12 @@ class KeyStore:
     def list_identities(self):
         """列出所有已存储的身份"""
         identities = []
-        for fname in os.listdir(self.key_dir):
+        try:
+            fnames = os.listdir(self.key_dir)
+        except OSError:
+            # R12: 延迟创建目录后, 只读列举在目录不存在时返回空
+            return []
+        for fname in fnames:
             if fname.endswith(".pub") and not fname.endswith(".ed25519.pub") \
                     and not fname.endswith(".x25519.pub"):
                 identity = fname[:-4]
@@ -576,6 +589,7 @@ class KeyStore:
         ed_pub = urlsafe_b64decode(bundle["ed25519_pub"].encode("ascii"))
         x_pub = urlsafe_b64decode(bundle["x25519_pub"].encode("ascii"))
 
+        self._ensure_dir()
         base = self.key_dir
         pub_path = os.path.join(base, f"{identity}.pub")
         if os.path.exists(pub_path):
@@ -609,6 +623,7 @@ class KeyStore:
     def import_public_key_b64(self, b64_pub: str, identity: str,
                               display_name: str = None):
         """从 Base64 导入旧版 RSA 公钥"""
+        self._ensure_dir()
         from core import urlsafe_b64decode
         pub_pem = urlsafe_b64decode(b64_pub)
         public_path = os.path.join(self.key_dir, f"{identity}.pub")
@@ -681,6 +696,7 @@ class KeyStore:
         """
         from core import urlsafe_b64decode
 
+        self._ensure_dir()
         base = self.key_dir
         # 守卫 1: 拒绝覆盖自身
         if os.path.exists(os.path.join(base, f"{identity}.key")):

@@ -1179,11 +1179,22 @@ class ChatApp(App):
             self.post_message(NotifyToast(f"文件发送异常: {e}", severity="error"))
             return
         if result.get("error"):
+            # R12: 失败也落库 (failed 状态), 不再只弹 toast 无痕迹
+            try:
+                fail_meta = {"name": os.path.basename(path),
+                             "error": result["error"]}
+                self.store.upsert_message(
+                    peer, f"local-{time.time():.6f}", self.identity, "file",
+                    json.dumps(fail_meta, ensure_ascii=False), "failed", 0,
+                    time.time())
+            except Exception:
+                pass
             self.post_message(NotifyToast(f"文件发送失败: {result['error']}", severity="error"))
             return
         ts = time.time()
+        # R12: 复用 send_file 已算出的 sha256, 免第三次全文件重读
         meta = {"name": os.path.basename(path), "size": os.path.getsize(path),
-                "sha256": sha256_file(path)}
+                "sha256": result.get("sha256") or sha256_file(path)}
         msg_id = result.get("msg_id") or f"local-{ts:.6f}"
         try:
             self.store.upsert_message(peer, msg_id, self.identity, "file",
