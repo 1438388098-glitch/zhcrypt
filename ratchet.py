@@ -305,6 +305,17 @@ def receive_message(state, msg):
 
     # Skip DH ratchet for first reply (their_ratchet_pub still unset)
     if their_ratchet_pub != state.their_ratchet_pub and state.their_ratchet_pub != b"\x00" * 32:
+        # R8: DH step 会重置接收链 —— 按对端声明的 previous_chain_length
+        # 把旧链在途消息的 MK 预存到 skipped_keys, 乱序到达的旧链消息
+        # 不再因链重置而永久不可解。
+        pn = payload.get("previous_chain_length")
+        if isinstance(pn, int) and not isinstance(pn, bool):
+            miss = pn - state.recv_msg_number
+            if 0 < miss <= MAX_SKIPPED:
+                ck = state.recv_chain_key
+                for n in range(state.recv_msg_number, pn):
+                    ck, mk = KDF_CK(ck)
+                    state._add_skipped(state.their_ratchet_pub, n, mk)
         _dh_ratchet_step(state, their_ratchet_pub)
 
     return _decrypt_message_in_chain(state, payload, msg)
@@ -544,15 +555,16 @@ def complete_session_first_message(state, sender_ratchet_pub_raw, nonce_b64, cip
         sid = sid.encode()
 
     CKr, MK = KDF_CK(state.recv_chain_key)
-    state.recv_chain_key = CKr
-    state.recv_msg_number += 1
-
+    # R8: 先验后进 —— 解密失败时不推进链, 也不销毁当前 MK;
+    # 此前链先走一步, 首条消息解密失败后对端重传同号消息即永久不可解。
     try:
         aesgcm = AESGCM(MK)
         plain = aesgcm.decrypt(nonce, ciphertext, sid)
-        return plain
     except Exception:
         return None
+    state.recv_chain_key = CKr
+    state.recv_msg_number += 1
+    return plain
 
 
 def deserialize_x25519_pub(pem_bytes):

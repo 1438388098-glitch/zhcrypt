@@ -33,6 +33,10 @@ def _char_set_size(password):
     if re.search(r"[0-9]", password): sets += 10
     if re.search(r"[!@#$%^&*()_+\-=\[\]{}|;':\",./<>?`~\\]", password): sets += 33
     if re.search(r"[\u4e00-\u9fff]", password): sets += 5000
+    # R8: 其它非 ASCII 字符 (西里尔/日文/emoji 等) 不再计 0 —— 记为
+    # ~200 的经验集合大小, 避免多语用户的强口令被系统性误判为弱。
+    if sets == 0 or re.search(r"[^\x00-\x7f\u4e00-\u9fff]", password):
+        sets += 200
     return max(sets, 1)
 
 

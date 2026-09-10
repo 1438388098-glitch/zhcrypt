@@ -80,6 +80,9 @@ def should_stream(size_bytes: int) -> bool:
     """
     try:
         from config import get
+        # R8: streaming.enabled 总开关 (原为无消费者的死配置键, 现接线)
+        if not get("streaming.enabled", True):
+            return False
         threshold = int(get("streaming.threshold_bytes", STREAM_THRESHOLD_DEFAULT))
     except Exception:
         threshold = STREAM_THRESHOLD_DEFAULT

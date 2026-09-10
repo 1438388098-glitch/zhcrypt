@@ -36,6 +36,18 @@ import inspect
 
 
 # 身份名校验：仅允许安全字符, 防止路径穿越 (审计 #2)
+def _atomic_write_json(path, data):
+    """R8: 原子写 JSON 文件 (tmp + os.replace)。
+
+    GUI 后台线程化后, .meta/.otpkeys/.spk 的写方与加载路径存在并发窗口,
+    半写文件会让 json.load 直接崩; 复制 session.py 的原子写范式。
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 
 
@@ -208,7 +220,7 @@ class KeyStore:
 
         meta = {
             "identity": identity,
-            "created": datetime.datetime.utcnow().isoformat() + "Z",
+            "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "comment": comment,
             "algorithm": "RSA-4096",
             "signing": "Ed25519",
@@ -218,8 +230,7 @@ class KeyStore:
                 public_pem + identity.encode("utf-8")
             ).hexdigest(),
         }
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(meta_path, meta)
 
         fingerprint = hashlib.sha256(public_pem).hexdigest()[:16]
         return {
@@ -319,8 +330,7 @@ class KeyStore:
                 with open(meta_path, "r", encoding="utf-8") as mf:
                     meta = json.load(mf)
                 meta["kem_upgraded"] = True
-                with open(meta_path, "w", encoding="utf-8") as mf:
-                    json.dump(meta, mf, ensure_ascii=False, indent=2)
+                _atomic_write_json(meta_path, meta)
             except Exception:
                 pass
         return True
@@ -585,13 +595,12 @@ class KeyStore:
 
         meta = {
             "identity": identity,
-            "imported": datetime.datetime.utcnow().isoformat() + "Z",
+            "imported": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "type": "imported_public_key_bundle",
         }
         if display_name:
             meta["display_name"] = display_name
-        with open(os.path.join(base, f"{identity}.meta"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(os.path.join(base, f"{identity}.meta"), meta)
         return "imported"
 
     @_validate_identity_arg
@@ -611,14 +620,13 @@ class KeyStore:
             f.write(pub_pem)
         meta = {
             "identity": identity,
-            "imported": datetime.datetime.utcnow().isoformat() + "Z",
+            "imported": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "type": "imported_public_key",
         }
         if display_name:
             meta["display_name"] = display_name
         meta_path = os.path.join(self.key_dir, f"{identity}.meta")
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(meta_path, meta)
         return "imported"
 
     def get_contact_display_name(self, identity: str):
@@ -649,8 +657,7 @@ class KeyStore:
             meta["display_name"] = display_name
         elif "display_name" in meta:
             del meta["display_name"]
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(meta_path, meta)
         return meta_path
 
     @_validate_identity_arg
@@ -777,8 +784,7 @@ class KeyStore:
             })
 
         otp_path = os.path.join(self.key_dir, f"{identity}.otpkeys")
-        with open(otp_path, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "keys": otp_entries}, f, ensure_ascii=False)
+        _atomic_write_json(otp_path, {"version": 1, "keys": otp_entries})
 
         spk_path = os.path.join(self.key_dir, f"{identity}.spk")
         spk_salt = secrets.token_bytes(SALT_SIZE)
@@ -790,8 +796,7 @@ class KeyStore:
             "nonce": urlsafe_b64encode(spk_nonce).decode("ascii"),
             "enc_priv": urlsafe_b64encode(spk_enc).decode("ascii"),
         }
-        with open(spk_path, "w", encoding="utf-8") as f:
-            json.dump(spk_data, f, ensure_ascii=False)
+        _atomic_write_json(spk_path, spk_data)
 
         fingerprint = hashlib.sha256(identity_key_pem).hexdigest()[:16]
 

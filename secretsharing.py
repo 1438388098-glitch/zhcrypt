@@ -40,7 +40,11 @@ def _lagrange_interpolate(points, x):
 
 
 def split_secret(secret_bytes: bytes, total=SHARES_TOTAL, threshold=SHARES_THRESHOLD):
-    secret_padded = secret_bytes.ljust(BYTE_LEN, b"\x00")[:BYTE_LEN]
+    if len(secret_bytes) > BYTE_LEN:
+        # R8: 不再静默截断 —— 调用方传 >32 字节密钥会恢复出错误密钥。
+        raise ValueError(f"秘密长度 {len(secret_bytes)} 超过上限 {BYTE_LEN} 字节, "
+                         f"请先自行哈希 (如 SHA-256) 再分片")
+    secret_padded = secret_bytes.ljust(BYTE_LEN, b"\x00")
     secret_int = _bytes_to_int(secret_padded)
 
     coefficients = [secret_int]
@@ -61,6 +65,12 @@ def recover_secret(shares: list, threshold=SHARES_THRESHOLD) -> bytes:
 
     if len({idx for idx, _ in shares}) != len(shares):
         raise ValueError("份额序号存在重复, 请检查输入")
+
+    # R8: 序号范围校验 —— idx=0 会让插值直接返回秘密值, 负数/超 total
+    # 属畸形输入, 一律拒绝。
+    for idx, _ in shares:
+        if not (1 <= idx <= SHARES_TOTAL):
+            raise ValueError(f"份额序号超出范围: {idx}")
 
     points = [(idx, _bytes_to_int(bytes.fromhex(hex_data)))
               for idx, hex_data in shares[:threshold]]

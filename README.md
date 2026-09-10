@@ -62,6 +62,15 @@ HKDF salt 随机化、Shamir 标准安全质数。
 - 服务器认证令牌仅经环境变量 `ZHPREKEY_TOKEN` 注入, 严禁提交到版本库。
 - 5000 端口直连暴露 (无 Nginx) 时必须设 `ZHPREKEY_TRUST_PROXY=0`,
   否则客户端可伪造 `X-Real-IP` 绕过消息限流 (默认 1 为反代部署保持兼容)。
+- 小规模/内网可启用原生 TLS (无需 Nginx, 见 `docs/zhcrypt_nginx_tls.md` 方案二):
+  `ZHPREKEY_TLS_CERT=/path/cert.pem ZHPREKEY_TLS_KEY=/path/key.pem python server.py`
+
+### 脚本化使用示例
+
+```bash
+# 密码不进 shell 历史: 管道输入检测强度
+echo "你的密码" | zhcrypt strength --stdin
+```
 
 ## 构建
 

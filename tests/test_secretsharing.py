@@ -81,7 +81,17 @@ def test_parse_share_rejects_garbage():
             parse_share(bad)
 
 
-def test_split_truncates_oversize_secret():
+def test_split_rejects_oversize_secret():
+    """R8: 超 32 字节不再静默截断 (截断会恢复出错误密钥)。"""
     secret = os.urandom(64)
+    with pytest.raises(ValueError):
+        split_secret(secret)
+
+
+def test_recover_rejects_out_of_range_index():
+    secret = os.urandom(BYTE_LEN)
     shares = split_secret(secret)
-    assert recover_secret(shares[:3]) == secret[:BYTE_LEN]
+    with pytest.raises(ValueError):
+        recover_secret([(0, shares[0][1]), shares[1], shares[2]])
+    with pytest.raises(ValueError):
+        recover_secret([(9, shares[0][1]), shares[1], shares[2]])
