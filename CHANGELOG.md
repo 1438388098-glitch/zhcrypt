@@ -1,5 +1,38 @@
 # 更新日志 (Changelog)
 
+## 3.1.x 自动迭代批次 (2026-09-10/11, autopilot R1-R6)
+
+### 安全 (Security)
+- **服务端**: prekey/message 端点身份白名单补齐; OTP 唯一索引 (防同一 one-time
+  prekey 被两次握手消耗); WS 禁止已认证连接重复 auth 换绑; 每身份每日上传配额
+  (ZHCHAT_DAILY_UPLOAD_QUOTA, 默认 500MB); X-Real-IP 信任开关
+  (ZHPREKEY_TRUST_PROXY=0 供直连部署); 401/403 安全事件日志; health 探测 DB。
+- **客户端**: import_peer_static_keys 三重守卫 (拒绝覆盖自身/PEM 合法性校验/
+  TOFU 锚保护签名公钥); 损坏公钥束明确报错 (不再静默降级); device.key 损坏
+  备份告警; backup/restore 身份名穿越校验; delete/chat-delete 二次确认。
+- **密码学**: decrypt_pfs 补齐 X25519 低阶点防护; 签名字段恒 64 字节校验
+  (防恶意 sig_len 切片错位); 文件密码模式改流式输出 (旧 0x01 格式仍可解)。
+
+### 性能 (Performance)
+- 会话文件固定 salt + 派生键进程内缓存: 每条聊天消息省一次 Argon2id(256MiB)。
+- config.json mtime 缓存; messages 双向查询 pair 索引; files.size 统计配额。
+- GUI 重操作 (RSA-4096 生成/Argon2id 加解密) 移入后台线程, 界面不再假死。
+
+### 修复 (Bugs)
+- pytest 9 收集兼容 (根 __init__ 相对导入兜底); zhcrypt --help 恢复;
+  子命令退出码不再丢弃; _token_lock 守护锁失效 (并发上传双写面);
+  上传会话回收释放互斥锁; os.rename→os.replace (Windows 覆盖);
+  history 分页同秒消息丢页 (rowid 决胜); consumed OTP 与 files 元数据行清理;
+  cleanup_expired.sh 端口 5002→5000 + 重试; requirements-server.lock 补
+  gunicorn/websockets; save_file_key 不再明文回退; LIKE 通配符转义;
+  Argon2 参数钳制两端统一; 剪贴板 60s 自动清空; 口令缓存 TTL 与禁用开关。
+
+### 文档/运维 (Docs & Ops)
+- 原生 TLS (ZHPREKEY_TLS_CERT/KEY) 兑现 nginx_tls 文档承诺; DEPLOY 改单
+  worker (--threads 8); build.ps1 可选 ISCC 安装包步骤 + 安装包 SHA256;
+  统一 should_stream 流式决策; CLI/GUI 版本文案引用 __version__;
+  GUI/CLI/TUI/keys/server/session/core 新增 90+ 项回归测试。
+
 ## 3.1.0 (2026-08-01)
 
 ### 安全修复 (Security)

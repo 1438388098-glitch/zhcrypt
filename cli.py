@@ -325,9 +325,12 @@ def cmd_encrypt_file(args):
         _err(f"文件不存在: {filepath}")
     pwd = _prompt_passphrase("输入加密密码: ")
     from config import get
+    from core import should_stream
     chunk_size = get("streaming.chunk_size", 65536)
     size = os.path.getsize(filepath)
-    use_legacy = args.legacy or size < 65536
+    # R6: 阈值决策统一走 core.should_stream (原写死 64KiB, 与 GUI 10MB 不一致);
+    # 两种路径自 3.1.x 起均输出流式格式, 差别仅在分块与内存占用。
+    use_legacy = args.legacy or not should_stream(size)
     try:
         with Spinner("正在加密文件..."):
             if use_legacy:
@@ -1130,6 +1133,50 @@ def main():
         cmd_shell()
         return
 
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    dispatch = {
+        "init": cmd_init, "list": cmd_list, "shell": cmd_shell,
+        "encrypt": cmd_encrypt, "decrypt": cmd_decrypt,
+        "encrypt-file": cmd_encrypt_file, "decrypt-file": cmd_decrypt_file,
+        "export": cmd_export, "import": cmd_import,
+        "export-bundle": cmd_export_bundle, "import-bundle": cmd_import_bundle,
+        "delete": cmd_delete, "info": cmd_info,
+        "set-server": cmd_set_server, "upload-prekey": cmd_upload_prekey,
+        "encrypt-signed": cmd_encrypt_signed, "backup": cmd_backup,
+        "restore": cmd_restore, "strength": cmd_strength,
+        "set-params": cmd_set_params,
+        "chat-send": cmd_chat_send, "chat-poll": cmd_chat_poll,
+        "chat-history": cmd_chat_history, "chat-status": cmd_chat_status,
+        "chat-delete": cmd_chat_delete, "chat-safety": cmd_chat_safety,
+        "cert-pin": cmd_cert_pin, "install-path": cmd_install_path,
+        "chat": cmd_chat_tui,
+    }
+    fn = dispatch.get(args.command)
+    if fn:
+        try:
+            rc = fn(args)
+        except KeyboardInterrupt:
+            print()
+            _err("已取消")
+            sys.exit(130)
+        except (FileNotFoundError, ValueError, DecryptionError) as e:
+            # R6: 常见业务异常映射为中文错误信息, 不再裸抛 traceback
+            # (AGENTS.md 约定: 失败返回中文错误, 不抛异常)
+            _err(str(e))
+            sys.exit(1)
+        except Exception as e:
+            _err(f"执行失败: {e}")
+            sys.exit(1)
+        # R4 修复: 不再丢弃子命令退出码 —— 返回非零 int 的命令 (如 chat)
+        # 以该码退出, 脚本调用方才能感知失败
+        if isinstance(rc, int) and rc != 0:
+            sys.exit(rc)
+
+def build_parser():
+    """构造顶层 argparse 解析器 (R6: 自 main 拆出, 便于测试与维护)。"""
     parser = argparse.ArgumentParser(
         prog="zhcrypt",
         description="zhcrypt - 中文端到端加密工具 (文件加密 / E2E 聊天 / Shamir 备份)",
@@ -1259,32 +1306,8 @@ def main():
 
     sub.add_parser("install-path")
 
-    args = parser.parse_args()
 
-    dispatch = {
-        "init": cmd_init, "list": cmd_list, "shell": cmd_shell,
-        "encrypt": cmd_encrypt, "decrypt": cmd_decrypt,
-        "encrypt-file": cmd_encrypt_file, "decrypt-file": cmd_decrypt_file,
-        "export": cmd_export, "import": cmd_import,
-        "export-bundle": cmd_export_bundle, "import-bundle": cmd_import_bundle,
-        "delete": cmd_delete, "info": cmd_info,
-        "set-server": cmd_set_server, "upload-prekey": cmd_upload_prekey,
-        "encrypt-signed": cmd_encrypt_signed, "backup": cmd_backup,
-        "restore": cmd_restore, "strength": cmd_strength,
-        "set-params": cmd_set_params,
-        "chat-send": cmd_chat_send, "chat-poll": cmd_chat_poll,
-        "chat-history": cmd_chat_history, "chat-status": cmd_chat_status,
-        "chat-delete": cmd_chat_delete, "chat-safety": cmd_chat_safety,
-        "cert-pin": cmd_cert_pin, "install-path": cmd_install_path,
-        "chat": cmd_chat_tui,
-    }
-    fn = dispatch.get(args.command)
-    if fn:
-        rc = fn(args)
-        # R4 修复: 不再丢弃子命令退出码 —— 返回非零 int 的命令 (如 chat)
-        # 以该码退出, 脚本调用方才能感知失败
-        if isinstance(rc, int) and rc != 0:
-            sys.exit(rc)
+    return parser
 
 if __name__ == "__main__":
     main()

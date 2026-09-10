@@ -27,6 +27,7 @@ from core import (
     packet_to_b64, b64_to_packet,
     encrypt_file_password_mode, decrypt_file_password_mode,
     encrypt_file_stream, decrypt_file_stream,
+    should_stream, __version__,
     DecryptionError,
 )
 from keys import KeyStore
@@ -107,7 +108,7 @@ class StrengthBar(ttk.Frame):
 class ZhCryptGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("zhcrypt - 中文加密系统 v3.0")
+        self.root.title(f"zhcrypt - 中文加密系统 v{__version__}")
         self.root.geometry("720x560")
         self.root.minsize(600, 440)
 
@@ -364,12 +365,18 @@ class ZhCryptGUI:
             messagebox.showwarning("警告", "请输入加密密码")
             return
         try:
-            packet = encrypt_password_mode(plain, pwd)
-            b64 = packet_to_b64(packet)
-            self.text_output.delete("1.0", tk.END)
-            self.text_output.insert("1.0", b64)
-            self.text_sig_status.config(text="")
-            self._set_status(f"加密完成 (明文 {len(plain)} 字符 -> 密文 {len(b64)} 字符)", 6000)
+            def _work():
+                packet = encrypt_password_mode(plain, pwd)
+                return packet_to_b64(packet)
+
+            def _done(b64):
+                self.text_output.delete("1.0", tk.END)
+                self.text_output.insert("1.0", b64)
+                self.text_sig_status.config(text="")
+                self._set_status(f"加密完成 (明文 {len(plain)} 字符 -> 密文 {len(b64)} 字符)", 6000)
+
+            # R6: Argon2id 派生移入后台线程, 防主线程假死
+            self._run_bg(_work, _done, busy_msg="正在加密 (Argon2id 派生中)...")
         except Exception as e:
             messagebox.showerror("错误", f"加密失败: {e}")
 
@@ -398,11 +405,17 @@ class ZhCryptGUI:
                     "密文已复制到剪贴板，直接粘贴即可解密。")
                 return
             else:
-                plain = decrypt_password_mode(packet, pwd)
-                self.text_output.delete("1.0", tk.END)
-                self.text_output.insert("1.0", plain)
-                self.text_sig_status.config(text="")
-                self._set_status("解密成功", 6000)
+                def _work():
+                    return decrypt_password_mode(packet, pwd)
+
+                def _done(plain):
+                    self.text_output.delete("1.0", tk.END)
+                    self.text_output.insert("1.0", plain)
+                    self.text_sig_status.config(text="")
+                    self._set_status("解密成功", 6000)
+
+                # R6: Argon2id 派生移入后台线程
+                self._run_bg(_work, _done, busy_msg="正在解密 (Argon2id 派生中)...")
         except DecryptionError as e:
             messagebox.showerror("解密失败", str(e))
         except ValueError as e:
@@ -432,6 +445,38 @@ class ZhCryptGUI:
             self._set_status("解密成功", 6000)
         except Exception as e:
             messagebox.showerror("错误", f"解密失败: {e}")
+
+    def _run_bg(self, work, on_done, on_error=None, busy_msg="处理中..."):
+        """R6: 重活 (RSA-4096 / Argon2id) 放后台线程, 结果经 after() 回主线程。
+
+        原实现文本/文件加解密与身份生成都在 Tk 主线程同步执行, 界面假死
+        数十秒; 后台线程异常还会静默死亡, 这里统一兜底回调。
+        """
+        self._set_status(busy_msg, 0)
+
+        def _worker():
+            try:
+                result = work()
+            except Exception as e:
+                self.root.after(0, lambda err=e: (
+                    on_error(err) if on_error
+                    else messagebox.showerror("错误", f"操作失败: {err}")))
+                return
+            self.root.after(0, lambda r=result: on_done(r))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _contact_display(self, ident):
+        """联系人显示备注缓存 (R6: 原实现对每个 peer 每次刷新都重读 meta)。"""
+        cache = getattr(self, "_display_name_cache", None)
+        if cache is None:
+            cache = self._display_name_cache = {}
+        if ident not in cache:
+            try:
+                cache[ident] = self.store.get_contact_display_name(ident) or ident
+            except Exception:
+                cache[ident] = ident
+        return cache[ident]
 
     def _copy_to_clipboard(self, text, clear_after_ms=60000):
         """复制到剪贴板, 默认 60 秒后自动清空 (R3: 防明文/密文常驻剪贴板)。"""
@@ -541,21 +586,30 @@ class ZhCryptGUI:
         if not pwd:
             messagebox.showwarning("警告", "请输入加密密码")
             return
-        try:
+        def _enc_work():
             src_size = os.path.getsize(path)
-            use_stream = src_size > 10 * 1024 * 1024  # > 10MB use streaming
-            self._file_log_append(f"[加密] {path} ({src_size:,} bytes)")
-            if use_stream:
+            # R6: 统一 should_stream 决策 (原 GUI 写死 10MB, CLI 写死 64KiB)
+            if should_stream(src_size):
                 out = encrypt_file_stream(path, pwd)
-                self._file_log_append("  (使用流式分块模式)")
-            else:
-                out = encrypt_file_password_mode(path, pwd)
+                return out, "流式分块"
+            out = encrypt_file_password_mode(path, pwd)
+            return out, "全量"
+
+        def _enc_done(result):
+            out, note = result
+            self._file_log_append(f"  ({note})" if note != "流式分块" else "  (使用流式分块模式)")
             out_size = os.path.getsize(out)
             self._file_log_append(f"  -> {out} ({out_size:,} bytes)")
             self._set_status(f"加密完成: {os.path.basename(out)}", 8000)
-        except Exception as e:
+
+        def _enc_error(e):
             self._file_log_append(f"  [错误] {e}")
             messagebox.showerror("错误", str(e))
+
+        self._file_log_append(f"[加密] {path} ({os.path.getsize(path):,} bytes)")
+        # R6: 移入后台线程
+        self._run_bg(_enc_work, _enc_done, on_error=_enc_error,
+                     busy_msg="正在加密文件 (Argon2id 派生中)...")
 
     def _on_file_decrypt(self):
         path = self.file_path_var.get()
@@ -570,38 +624,45 @@ class ZhCryptGUI:
             self._file_log_append(f"[解密] {path}")
             with open(path, "rb") as f:
                 hdr = f.read(6)  # MAGIC(4) + VERSION(1) + MODE(1)
-            if hdr[:4] == b"ZHCR":
-                mode_byte = hdr[5:6]
-                if mode_byte == bytes([5]):
-                    try:
-                        out = decrypt_file_stream(path, pwd, overwrite=False)
-                    except FileExistsError:
-                        if not messagebox.askyesno("确认覆盖", f"输出文件已存在，是否覆盖?"):
-                            return
-                        out = decrypt_file_stream(path, pwd, overwrite=True)
-                else:
-                    try:
-                        out = decrypt_file_password_mode(path, pwd, overwrite=False)
-                    except FileExistsError:
-                        if not messagebox.askyesno("确认覆盖", f"输出文件已存在，是否覆盖?"):
-                            return
-                        out = decrypt_file_password_mode(path, pwd, overwrite=True)
-            else:
-                try:
-                    out = decrypt_file_password_mode(path, pwd, overwrite=False)
-                except FileExistsError:
-                    if not messagebox.askyesno("确认覆盖", f"输出文件已存在，是否覆盖?"):
-                        return
-                    out = decrypt_file_password_mode(path, pwd, overwrite=True)
 
-            self._file_log_append(f"  -> {out}")
-            self._set_status(f"解密完成: {os.path.basename(out)}", 8000)
-        except DecryptionError as e:
-            self._file_log_append(f"  [错误] {e}")
-            messagebox.showerror("解密失败", str(e))
-        except FileExistsError as e:
-            self._file_log_append(f"  [错误] {e}")
-            messagebox.showerror("文件已存在", str(e))
+            if hdr[:4] != b"ZHCR":
+                use_stream = False
+            else:
+                use_stream = hdr[5:6] == bytes([5])
+
+            def _work():
+                # R6: 统一走流式判定, 解密 (Argon2id 派生) 移入后台线程
+                if use_stream:
+                    return decrypt_file_stream(path, pwd, overwrite=False)
+                return decrypt_file_password_mode(path, pwd, overwrite=False)
+
+            def _done(out):
+                self._file_log_append(f"  -> {out}")
+                self._set_status(f"解密完成: {os.path.basename(out)}", 8000)
+
+            def _error(e):
+                if isinstance(e, FileExistsError):
+                    if messagebox.askyesno("确认覆盖", "输出文件已存在，是否覆盖?"):
+                        def _work2():
+                            if use_stream:
+                                return decrypt_file_stream(path, pwd, overwrite=True)
+                            return decrypt_file_password_mode(path, pwd, overwrite=True)
+
+                        def _done2(out):
+                            self._file_log_append(f"  -> {out}")
+                            self._set_status(f"解密完成: {os.path.basename(out)}", 8000)
+
+                        self._run_bg(_work2, _done2, on_error=_error,
+                                     busy_msg="正在解密 (Argon2id 派生中)...")
+                    return
+                self._file_log_append(f"  [错误] {e}")
+                if isinstance(e, DecryptionError):
+                    messagebox.showerror("解密失败", str(e))
+                else:
+                    messagebox.showerror("错误", str(e))
+
+            self._run_bg(_work, _done, on_error=_error,
+                         busy_msg="正在解密 (Argon2id 派生中)...")
         except Exception as e:
             self._file_log_append(f"  [错误] {e}")
             messagebox.showerror("错误", str(e))
@@ -783,15 +844,24 @@ class ZhCryptGUI:
             if len(pwd.encode("utf-8")) < 8:
                 if not messagebox.askyesno("确认", "密码较短, 是否继续?", parent=dialog):
                     return
-            try:
-                info = self.store.generate_identity(name, pwd, comment)
+
+            # R6: RSA-4096 生成 + 多次 Argon2id 派生需数十秒, 移入后台线程
+            def _work():
+                return self.store.generate_identity(name, pwd, comment)
+
+            def _done(info):
                 self._refresh_identity_list()
                 self._refresh_hybrid_identities()
                 messagebox.showinfo("成功", f"身份 '{name}' 创建成功!\n指纹: {info['fingerprint']}",
                                     parent=dialog)
                 dialog.destroy()
-            except Exception as e:
+
+            def _error(e):
                 messagebox.showerror("错误", str(e), parent=dialog)
+
+            self._run_bg(_work, _done, on_error=_error,
+                         busy_msg="正在生成密钥 (RSA-4096 + Argon2id, 需数十秒)...")
+            return
 
         ttk.Button(frame, text="创建", command=do_init).pack(pady=(8, 0))
 
@@ -947,7 +1017,7 @@ class ZhCryptGUI:
 
         frame_info = ttk.LabelFrame(main, text="系统信息", padding=10)
         frame_info.pack(fill=tk.X)
-        info_text = f"版本: zhcrypt v3.0.0\nPython: {sys.version[:5]}"
+        info_text = f"版本: zhcrypt v{__version__}\nPython: {sys.version[:5]}"
         ttk.Label(frame_info, text=info_text).pack(anchor=tk.W)
 
     def _on_apply_params(self):
@@ -1366,10 +1436,11 @@ class ZhCryptGUI:
             pass
         peers = sorted(set(peers))
         # 显示备注, 路由用真实身份: 建立 显示文本 -> identity 映射
+        # (R6: display_name 走进程内缓存, 不再每 peer 每次刷新重读 meta)
         self._peer_display_map = {}
         values = []
         for ident in peers:
-            disp = self.store.get_contact_display_name(ident) or ident
+            disp = self._contact_display(ident)
             values.append(disp)
             self._peer_display_map[disp] = ident
         try:
@@ -2163,7 +2234,7 @@ class ZhCryptGUI:
             "绿色 = 强（大写+小写+数字+符号，12位以上）\n"
             "极强 = 80 bits 以上（几乎不可能暴力破解）\n\n"
             "临时口令功能：\n"
-            "点「临时口令」生成 4 个随机中文词的密码，\n"
+            "点「临时口令」生成 6 个随机中文词的密码 (约 48bit)，\n"
             "只用一次就丢。适合临时分享文件。\n"
             "口令只显示一次，请立即复制。")
 
@@ -2197,7 +2268,7 @@ class ZhCryptGUI:
 
     def _on_about(self):
         messagebox.showinfo("关于 zhcrypt",
-                            "zhcrypt v3.0 - 中文加密系统\n\n"
+                            f"zhcrypt v{__version__} - 中文加密系统\n\n"
                             "密码学栈:\n"
                             "  Argon2id (RFC 9106) - 密钥派生\n"
                             "  AES-256-GCM - 对称加密\n"

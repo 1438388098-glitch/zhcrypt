@@ -67,6 +67,25 @@ def _clear_bytes(data: bytearray):
     data[:] = b"\x00" * len(data)
 
 
+# R6: CLI(64KiB) 与 GUI(10MB) 曾各用一套流式阈值且互不一致, 统一由
+# should_stream 决策; 可经 config streaming.threshold_bytes 覆盖。
+STREAM_THRESHOLD_DEFAULT = 64 * 1024
+
+
+def should_stream(size_bytes: int) -> bool:
+    """文件加解密是否走流式分块路径 (R6: CLI/GUI 统一决策入口)。
+
+    3.1.x 起文件密码模式本身也产出流式格式, 阈值主要影响分块大小与
+    内存占用; 预留配置接入点 (streaming.threshold_bytes, 最低 1KiB)。
+    """
+    try:
+        from config import get
+        threshold = int(get("streaming.threshold_bytes", STREAM_THRESHOLD_DEFAULT))
+    except Exception:
+        threshold = STREAM_THRESHOLD_DEFAULT
+    return size_bytes >= max(1024, threshold)
+
+
 def _get_argon2_params():
     """从配置文件读取 Argon2id 参数 (如果可用)
 

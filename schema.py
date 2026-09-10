@@ -86,6 +86,7 @@ FILES_TABLE_SQL = """
         token TEXT PRIMARY KEY,
         uploader TEXT NOT NULL,
         intended_recipient TEXT,
+        size INTEGER DEFAULT 0,
         server_ts REAL NOT NULL
     )
 """

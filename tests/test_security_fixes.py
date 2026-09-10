@@ -322,7 +322,8 @@ try:
 
     db7 = _sql.connect(":memory:")
     db7.row_factory = _sql.Row
-    db7.execute("CREATE TABLE files (token TEXT PRIMARY KEY, uploader TEXT NOT NULL, intended_recipient TEXT, server_ts REAL NOT NULL)")
+    # R6: files 表新增 size 列 (配额统计), 与 schema.FILES_TABLE_SQL 对齐
+    db7.execute("CREATE TABLE files (token TEXT PRIMARY KEY, uploader TEXT NOT NULL, intended_recipient TEXT, size INTEGER DEFAULT 0, server_ts REAL NOT NULL)")
 
     record_file_upload(db7, "t1", "alice", "bob")
     check("上传者可下载自己的文件", can_download_file(db7, "t1", "alice"))

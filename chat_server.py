@@ -75,8 +75,9 @@ def init_message_db():
     db.execute(MESSAGES_IDX_SESSION_SQL)
     # V5: 文件元数据表，记录上传者与关联消息
     db.execute(FILES_TABLE_SQL)
-    # 兼容旧库: 补齐 intended_recipient 列 (审计 #7)
+    # 兼容旧库: 补齐 intended_recipient 列 (审计 #7) 与 size 列 (R6 配额统计)
     add_column(db, "files", "intended_recipient", "TEXT")
+    add_column(db, "files", "size", "INTEGER DEFAULT 0")
     db.commit()
     db.close()
 
@@ -95,12 +96,12 @@ def _connect():
     return db
 
 
-def record_file_upload(db, token, uploader, recipient):
-    """记录文件上传元数据 (含预期接收方); recipient 为空表示仅上传者可下载"""
+def record_file_upload(db, token, uploader, recipient, size=0):
+    """记录文件上传元数据 (含预期接收方与大小); recipient 为空表示仅上传者可下载"""
     db.execute(
-        "INSERT INTO files (token, uploader, intended_recipient, server_ts) "
-        "VALUES (?, ?, ?, ?)",
-        (token, uploader, recipient or "", _now()),
+        "INSERT OR REPLACE INTO files (token, uploader, intended_recipient, size, server_ts) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (token, uploader, recipient or "", int(size or 0), _now()),
     )
     db.commit()
 
@@ -420,13 +421,29 @@ async def handler(websocket, path=None):
                     await websocket.send(json.dumps(
                         {"type": "error", "code": 413, "message": "file too large"}))
                     continue
+                # R6: 每身份每日累计配额 (默认 500MB), 防多文件慢速灌盘
+                db = _connect()
+                try:
+                    row = db.execute(
+                        "SELECT COALESCE(SUM(size), 0) FROM files "
+                        "WHERE uploader = ? AND server_ts > ?",
+                        (identity, _now() - 86400)).fetchone()
+                finally:
+                    db.close()
+                used_today = row[0] if row else 0
+                if used_today + len(file_blob) > _DAILY_UPLOAD_QUOTA:
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 413,
+                         "message": "daily upload quota exceeded"}))
+                    continue
                 token = secrets.token_hex(16)
                 file_path = os.path.join(FILE_DIR, token)
                 with open(file_path, "wb") as f:
                     f.write(file_blob)
                 # V5/#7: 记录上传者身份与预期接收方 (接收方由客户端在发送文件时提供)
                 db = _connect()
-                record_file_upload(db, token, identity, data.get("recipient", ""))
+                record_file_upload(db, token, identity, data.get("recipient", ""),
+                                   size=len(file_blob))
                 db.close()
                 await websocket.send(json.dumps({
                     "type": "file_upload_ack",
@@ -481,6 +498,15 @@ async def handler(websocket, path=None):
             # 防止旧连接断开误删同身份的新连接条目 (实时推送静默失效)
             if connected_clients.get(identity) is websocket:
                 connected_clients.pop(identity, None)
+
+
+# R6: 每身份每日上传配额 (字节), 防认证用户绕过单文件上限缓慢写满磁盘。
+# 可用环境变量 ZHCHAT_DAILY_UPLOAD_QUOTA 覆盖 (默认 500MB)。
+try:
+    _DAILY_UPLOAD_QUOTA = max(1024 * 1024, int(os.environ.get(
+        "ZHCHAT_DAILY_UPLOAD_QUOTA", str(500 * 1024 * 1024))))
+except ValueError:
+    _DAILY_UPLOAD_QUOTA = 500 * 1024 * 1024
 
 
 async def cleanup_loop():

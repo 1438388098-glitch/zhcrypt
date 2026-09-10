@@ -158,12 +158,12 @@ def _active_uploads(identity):
                if s["identity"] == identity)
 
 
-def _record_file_upload(db, token, uploader, recipient):
+def _record_file_upload(db, token, uploader, recipient, size=0):
     """记录文件上传元数据 (与 chat_server.record_file_upload 同构)。"""
     db.execute(
-        "INSERT INTO files (token, uploader, intended_recipient, server_ts) "
-        "VALUES (?, ?, ?, ?)",
-        (token, uploader, recipient or "", time.time()),
+        "INSERT OR REPLACE INTO files (token, uploader, intended_recipient, size, server_ts) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (token, uploader, recipient or "", int(size or 0), time.time()),
     )
     db.commit()
 
@@ -212,8 +212,9 @@ def init_db():
         ON prekeys(identity, consumed, created_at)
     """)
     db.execute(IDENTITIES_TABLE_SQL)
-    # 兼容已存在的库: 补齐 signing_public_key 列 (审计 #5)
+    # 兼容已存在的库: 补齐 signing_public_key 列 (审计 #5) 与 files.size 列 (R6)
     add_column(db, "identities", "signing_public_key", "TEXT")
+    add_column(db, "files", "size", "INTEGER DEFAULT 0")
     db.execute(MESSAGES_TABLE_SQL)
     db.execute(MESSAGES_IDX_RECIPIENT_SQL)
     db.execute(MESSAGES_IDX_SESSION_SQL)
@@ -913,7 +914,7 @@ def file_upload():
         _upload_sessions.pop(upload_token, None)
         _upload_locks.pop(upload_token, None)
         db = get_db()
-        _record_file_upload(db, upload_token, identity, recipient)
+        _record_file_upload(db, upload_token, identity, recipient, size=total)
         return jsonify({"token": upload_token}), 201
 
 

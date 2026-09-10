@@ -4,9 +4,11 @@ zhcrypt v3.0 - 配置管理模块
 """
 
 import os
+import copy
 import json
 import secrets
 import sys
+import threading
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -72,25 +74,54 @@ def ensure_config_dir():
     os.makedirs(CONFIG_DIR, exist_ok=True)
 
 
+# R6 性能: get_auth_token / GUI 2s 轮询等路径高频调用 load(), 原实现每次
+# 全量读盘 + JSON 解析 + 深合并。按 mtime 做进程内缓存; 对外仍返回副本,
+# 调用方直接改返回值不会污染缓存 (与旧版每次新 dict 的语义一致)。
+_CONFIG_CACHE = {"mtime": None, "cfg": None}
+_CONFIG_CACHE_LOCK = threading.RLock()
+
+
 def load():
-    ensure_config_dir()
-    if not os.path.exists(CONFIG_PATH):
-        save(DEFAULT_CONFIG)
-        return dict(DEFAULT_CONFIG)
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        merged = dict(DEFAULT_CONFIG)
-        _deep_merge(merged, cfg)
-        return merged
-    except (json.JSONDecodeError, OSError):
-        return dict(DEFAULT_CONFIG)
+    """读取配置 (mtime 缓存; 无配置文件时初始化为默认值)。"""
+    with _CONFIG_CACHE_LOCK:
+        try:
+            mtime = os.path.getmtime(CONFIG_PATH)
+        except OSError:
+            mtime = None
+        if _CONFIG_CACHE["cfg"] is not None and _CONFIG_CACHE["mtime"] == mtime:
+            return copy.deepcopy(_CONFIG_CACHE["cfg"])
+        ensure_config_dir()
+        if mtime is None:
+            _write_config(DEFAULT_CONFIG)
+            _CONFIG_CACHE["cfg"] = dict(DEFAULT_CONFIG)
+        else:
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                merged = dict(DEFAULT_CONFIG)
+                _deep_merge(merged, raw)
+                _CONFIG_CACHE["cfg"] = merged
+            except (json.JSONDecodeError, OSError):
+                _CONFIG_CACHE["cfg"] = dict(DEFAULT_CONFIG)
+        _CONFIG_CACHE["mtime"] = mtime
+        return copy.deepcopy(_CONFIG_CACHE["cfg"])
 
 
-def save(cfg):
+def _write_config(cfg):
     ensure_config_dir()
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def save(cfg):
+    _write_config(cfg)
+    # 写后刷新缓存并记录新 mtime (同进程后续读取直接命中)
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE["cfg"] = copy.deepcopy(cfg)
+        try:
+            _CONFIG_CACHE["mtime"] = os.path.getmtime(CONFIG_PATH)
+        except OSError:
+            _CONFIG_CACHE["mtime"] = None
 
 
 def get(key_path, default=None):
