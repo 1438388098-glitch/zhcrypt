@@ -1099,15 +1099,22 @@ class ZhCryptGUI:
             messagebox.showwarning("警告", "请输入你的私钥密码")
             return
 
-        try:
+        # R10: 私钥 unwrap (Argon2id 256MiB) 移入后台线程, 防主线程假死
+        def _work():
             pub_pem = self.store.load_public_key(receiver)
             packet = encrypt_hybrid(f"--sender={sender}\n{plain}", pub_pem)
-            b64 = packet_to_b64(packet)
+            return packet_to_b64(packet)
+
+        def _done(b64):
             self.hybrid_output.delete("1.0", tk.END)
             self.hybrid_output.insert("1.0", b64)
             self._set_status(f"混合加密完成: {sender} -> {receiver}", 6000)
-        except Exception as e:
+
+        def _error(e):
             messagebox.showerror("错误", f"加密失败: {e}")
+
+        self._run_bg(_work, _done, on_error=_error,
+                     busy_msg="正在混合加密 (Argon2id 派生中)...")
 
     def _on_hybrid_decrypt(self):
         cipher = self.hybrid_input.get("1.0", "end-1c").strip()
@@ -1125,17 +1132,25 @@ class ZhCryptGUI:
             messagebox.showwarning("警告", "请输入你的私钥密码")
             return
 
-        try:
+        # R10: 私钥 unwrap (Argon2id 256MiB) 移入后台线程
+        def _work():
             packet = b64_to_packet(cipher)
             private_pem = self.store.load_private_key_pem(sender, pwd)
-            plain = decrypt_hybrid(packet, private_pem, pwd)
+            return decrypt_hybrid(packet, private_pem, pwd)
+
+        def _done(plain):
             self.hybrid_output.delete("1.0", tk.END)
             self.hybrid_output.insert("1.0", plain)
             self._set_status("混合解密成功", 6000)
-        except DecryptionError as e:
-            messagebox.showerror("解密失败", str(e))
-        except Exception as e:
-            messagebox.showerror("错误", f"解密失败: {e}")
+
+        def _error(e):
+            if isinstance(e, DecryptionError):
+                messagebox.showerror("解密失败", str(e))
+            else:
+                messagebox.showerror("错误", f"解密失败: {e}")
+
+        self._run_bg(_work, _done, on_error=_error,
+                     busy_msg="正在混合解密 (Argon2id 派生中)...")
 
     def _on_hybrid_copy(self):
         text = self.hybrid_output.get("1.0", "end-1c").strip()

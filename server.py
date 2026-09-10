@@ -552,6 +552,8 @@ MESSAGE_RATE_LIMIT = 30
 MESSAGE_RETENTION_DAYS = 30
 
 _message_rate_buckets = {}
+# R10: Flask threaded 模式下桶的读-改-写非原子, 并发请求可突破限流上限
+_rate_buckets_lock = threading.Lock()
 
 # R2 加固: 是否信任反代头 X-Real-IP。默认 1 保持既有 Nginx 反代部署行为;
 # 5000 端口直连暴露的部署必须设 ZHPREKEY_TRUST_PROXY=0, 否则客户端可
@@ -576,17 +578,18 @@ def _client_ip():
 
 
 def _check_message_rate(key):
-    now = _now()
-    bucket = [t for t in _message_rate_buckets.get(key, []) if now - t < 60]
-    if bucket:
+    with _rate_buckets_lock:
+        now = _now()
+        bucket = [t for t in _message_rate_buckets.get(key, []) if now - t < 60]
+        if bucket:
+            _message_rate_buckets[key] = bucket
+        else:
+            _message_rate_buckets.pop(key, None)  # 防键无限增长 (内存 DoS, 审计 M5)
+        if len(bucket) >= MESSAGE_RATE_LIMIT:
+            return False
+        bucket.append(now)
         _message_rate_buckets[key] = bucket
-    else:
-        _message_rate_buckets.pop(key, None)  # 防键无限增长 (内存 DoS, 审计 M5)
-    if len(bucket) >= MESSAGE_RATE_LIMIT:
-        return False
-    bucket.append(now)
-    _message_rate_buckets[key] = bucket
-    return True
+        return True
 
 
 _PREKEY_RATE_BUCKETS = {}
@@ -599,17 +602,18 @@ def _check_prekey_rate_limit(identity):
     注: 服务端位于 Nginx 反代之后, request.remote_addr 为 Nginx IP,
     故不采用 _client_ip() 以避免所有请求被误判为同一来源.
     """
-    now = _now()
-    bucket = [t for t in _PREKEY_RATE_BUCKETS.get(identity, []) if now - t < 60]
-    if bucket:
+    with _rate_buckets_lock:
+        now = _now()
+        bucket = [t for t in _PREKEY_RATE_BUCKETS.get(identity, []) if now - t < 60]
+        if bucket:
+            _PREKEY_RATE_BUCKETS[identity] = bucket
+        else:
+            _PREKEY_RATE_BUCKETS.pop(identity, None)  # 防键无限增长 (内存 DoS, 审计 M5)
+        if len(bucket) >= RATE_LIMIT:
+            return False
+        bucket.append(now)
         _PREKEY_RATE_BUCKETS[identity] = bucket
-    else:
-        _PREKEY_RATE_BUCKETS.pop(identity, None)  # 防键无限增长 (内存 DoS, 审计 M5)
-    if len(bucket) >= RATE_LIMIT:
-        return False
-    bucket.append(now)
-    _PREKEY_RATE_BUCKETS[identity] = bucket
-    return True
+        return True
 
 
 @app.route("/v1/messages/send", methods=["POST"])

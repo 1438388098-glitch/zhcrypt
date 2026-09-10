@@ -26,4 +26,4 @@ try:
     from .strength import get_strength, estimate_entropy
     from .secretsharing import split_secret, recover_secret
 except ImportError:
-    __version__ = "3.1.0"
+    __version__ = "3.2.0"

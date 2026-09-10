@@ -4,3 +4,5 @@ cryptography>=3.0
 argon2-cffi>=21.1
 websocket-client>=1.0
 textual>=0.60
+# R10: GUI 桌面通知为软依赖 (缺失时自动降级, 打包版经 hiddenimports 带入)
+plyer>=2.1

@@ -151,12 +151,14 @@ class KeyStore:
       <identity>.meta         - 密钥元数据 JSON
       config.json             - 全局配置 (默认身份等)
 
-    私钥加密流程:
+    私钥加密流程 (_wrap_key_data, R10 修正文档与实现一致):
       1. 生成随机 32 字节 salt
-      2. Argon2id(password + salt) → 256-bit 密钥
-      3. HKDF-Expand(密钥, "zhcrypt-key-wrap") → 256-bit wrapping key
-      4. AES-256-GCM(wrapping_key, private_key_pem) → 加密私钥
-      5. 存储: salt | nonce | encrypted_private_key
+      2. Argon2id(password, salt) → 256-bit wrapping key
+         (实际实现直接以 Argon2id 输出作为 AES-GCM 密钥, 此前文档声称的
+          HKDF-Expand("zhcrypt-key-wrap") 步骤并不存在; 若引入该步骤属
+          协议变更, 需迁移旧密钥文件)
+      3. AES-256-GCM(wrapping_key, private_key_pem) → 加密私钥
+      4. 存储: params(12) | salt(32) | nonce(12) | ciphertext+tag
     """
 
     def __init__(self, key_dir: str = None):

@@ -33,10 +33,28 @@ zhcrypt 是一套端到端加密的中文通信系统，采用以下安全机制
 默认连接内置服务器。如需自托管，请修改服务器地址与认证配置
 （认证令牌经环境变量 `ZHPREKEY_TOKEN` 注入，并需携带 `identity` 字段）。
 
+自托管部署见 `docs/DEPLOY.md`（含 chat 服务与全量环境变量表）、
+TLS 配置见 `docs/zhcrypt_nginx_tls.md`。
+
+## 命令行速查
+
+```bash
+zhcrypt --help                 # 全部 29 个子命令
+zhcrypt init 名字               # 创建身份
+zhcrypt encrypt-file 文件       # 文件加密 (输出 .zhe)
+zhcrypt chat                   # 端到端加密聊天 (TUI)
+zhcrypt chat-safety -t 对端    # 查看与对端的安全识别码 (线下比对)
+zhcrypt cert-pin https://域名  # 计算并固定服务器证书指纹
+echo "密码" | zhcrypt strength --stdin   # 强度检测 (不进 shell 历史)
+```
+
+完整命令说明见 `docs/manual.md`。
+
 ## 安全提示
 
 - 请使用**高强度密码**：弱密码（如 `woaini1314`）在本地可被字典攻击秒破。
 - 务必**线下比对安全识别码**，防止中间人攻击。
 - 大文件阅后即焚后无法再次下载，请接收方及时保存。
+- 自托管直连（不经 Nginx）务必设 `ZHPREKEY_TRUST_PROXY=0`。
 
 详见项目文档与 `docs/` 目录。

@@ -54,10 +54,8 @@ zhcrypt info        # 查看系统信息
 
 ### 图形界面
 
-```batch
-cd %USERPROFILE%\zhcrypt
-zhcrypt gui
-```
+GUI 由安装包的开始菜单「zhcrypt GUI」入口或 `zhcrypt-gui.exe` 启动
+（CLI 无 `gui` 子命令, 直接运行 `zhcrypt` 不带参数进入交互式 shell）。
 
 ---
 
@@ -467,12 +465,16 @@ https://YOUR_SERVER/prekey/v1/prekey/<identity>  → prekey 存储/获取
 | `zhcrypt import-bundle <data> <name>` | 导入完整公钥束 |
 | `zhcrypt backup [name]` | 备份私钥 (Shamir 5份额) |
 | `zhcrypt restore [name]` | 恢复私钥 |
-| `zhcrypt strength [password]` | 测试密码强度 |
+| `zhcrypt strength [password] [--stdin]` | 测试密码强度 (建议省略 password 交互输入, 或 --stdin 管道) |
 | `zhcrypt set-params [--time T] [--mem MB] [--par P]` | 设置加密参数 |
-| `zhcrypt set-server <url> [--token T]` | 配置 prekey 服务器 |
+| `zhcrypt set-server <url> [--token T] [--pin 指纹]` | 配置 prekey 服务器与证书固定 |
 | `zhcrypt upload-prekey [name] [--count N]` | 上传 prekey |
+| `zhcrypt chat` / `chat-send` / `chat-poll` / `chat-history` / `chat-status` / `chat-delete` / `chat-safety` | 端到端加密聊天 (TUI 与 REST 工具) |
+| `zhcrypt cert-pin <url>` | 计算并固定服务器证书指纹 |
+| `zhcrypt export-bundle` / `import-bundle` | 完整身份捆绑导出/导入 |
 | `zhcrypt info` | 系统信息 |
-| `zhcrypt gui` | 打开图形界面 |
+
+> 完整命令以 `zhcrypt --help` 为准; 图形界面见开始菜单「zhcrypt GUI」。
 
 ---
 

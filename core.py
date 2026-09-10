@@ -28,7 +28,7 @@ from cryptography.hazmat.backends import default_backend
 
 from argon2.low_level import hash_secret_raw, Type
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 
 MAGIC = b"ZHCR"
 VERSION = 1

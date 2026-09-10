@@ -565,7 +565,10 @@ async def main():
 
     async with websockets.serve(handler, HOST, PORT,
                                  ping_interval=30, ping_timeout=60,
-                                 max_size=100 * 1024 * 1024):
+                                 # R10: 100MB → 64MB —— WS 单文件二进制上限约
+                                 # 37.5MB, base64 后 ~50MB, 64MB 已足够且缩小
+                                 # 单帧内存放大面。
+                                 max_size=64 * 1024 * 1024):
         await cleanup_loop()
 
 

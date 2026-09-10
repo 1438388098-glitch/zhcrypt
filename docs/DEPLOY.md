@@ -111,3 +111,50 @@ curl https://prekey.YOUR_DOMAIN/v1/health
 # 客户端验证
 zhcrypt upload-prekey --dry-run
 ```
+
+---
+
+## 8. chat 服务 (zhchat-ws.service)
+
+`chat_server.py` 是 WebSocket 聊天中继 (仅存加密信封, 不可读消息内容),
+与 prekey 服务共用同一 DB 与 token。
+
+### systemd 单元示例
+
+```ini
+[Unit]
+Description=zhcrypt chat websocket server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zhcrypt-server
+Environment=ZHCHAT_TOKEN=your-token-here
+Environment=ZHCHAT_WS_PORT=5003
+ExecStart=/opt/zhcrypt-server/venv/bin/python chat_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 环境变量总表
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ZHPREKEY_TOKEN` | (必填) | server.py 认证 token, 未设置启动即退出 |
+| `ZHPREKEY_DB` | 脚本目录/zhprekey.db | SQLite 路径 (两个服务共用) |
+| `ZHPREKEY_EXPIRE_DAYS` | 7 | 未消耗 prekey 保留天数 |
+| `ZHPREKEY_TLS_CERT` / `ZHPREKEY_TLS_KEY` | (空) | 原生 TLS 证书/私钥 (两者都设置才启用) |
+| `ZHPREKEY_TRUST_PROXY` | 1 | 是否信任 X-Real-IP; 直连暴露必须设 0 |
+| `ZHPREKEY_PORT` | 5000 | 预留端口覆盖 (原生 TLS 部署时使用) |
+| `ZHCHAT_TOKEN` | 回退 ZHPREKEY_TOKEN | chat_server 认证 token |
+| `ZHCHAT_WS_HOST` / `ZHCHAT_WS_PORT` | 0.0.0.0 / 5003 | WS 监听地址与端口 |
+| `ZHCHAT_FILE_DIR` | DB 目录/files | 文件存储目录 (两个服务共用) |
+| `ZHCHAT_MAX_FILE_SIZE` | 2GiB | REST 分块上传单文件上限 |
+| `ZHCHAT_DAILY_UPLOAD_QUOTA` | 500MB | WS 路径每身份每日上传配额 |
+
+> 安全提醒: 生产环境经 Nginx 统一终止 TLS (443 → 5000/5003),
+> 两个端口均只监听 127.0.0.1。
