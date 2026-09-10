@@ -1627,11 +1627,25 @@ def _pw_cache_path(identity):
                         f".pw_{h}.bin")
 
 
+# R3: 记住密码的可配置时效与总开关。
+#   ZHCRYPT_PW_CACHE=0        完全禁用记住密码 (口令不落盘)
+#   ZHCRYPT_PW_CACHE_TTL=秒   缓存有效期, 默认 12 小时, 过期即焚
+_PW_CACHE_ENABLED = os.environ.get("ZHCRYPT_PW_CACHE", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+try:
+    _PW_CACHE_TTL_SECONDS = max(60, int(os.environ.get("ZHCRYPT_PW_CACHE_TTL",
+                                                       str(12 * 3600))))
+except ValueError:
+    _PW_CACHE_TTL_SECONDS = 12 * 3600
+
+
 def _save_pw_cache(identity, passphrase):
     """记住密码 (AES-256-GCM 加密, 密钥来自 config 的 device.key)。
 
     AAD 绑定身份: 防跨身份串号 (GCM tag 校验).
     """
+    if not _PW_CACHE_ENABLED:
+        return False
     try:
         from config import DEVICE_KEY_PATH
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -1654,12 +1668,21 @@ def _save_pw_cache(identity, passphrase):
 
 
 def _load_pw_cache(identity):
-    """读取记住的密码; 无缓存/解密失败/身份不匹配返回 None。"""
+    """读取记住的密码; 无缓存/过期/解密失败/身份不匹配返回 None。"""
+    if not _PW_CACHE_ENABLED:
+        return None
     try:
         from config import DEVICE_KEY_PATH
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         path = _pw_cache_path(identity)
         if not os.path.isfile(path) or not os.path.exists(DEVICE_KEY_PATH):
+            return None
+        # R3: TTL 过期即焚, 避免口令缓存无限期驻留磁盘
+        if time.time() - os.path.getmtime(path) > _PW_CACHE_TTL_SECONDS:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
             return None
         with open(DEVICE_KEY_PATH, "rb") as f:
             key = f.read()

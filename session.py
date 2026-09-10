@@ -9,6 +9,7 @@ import os
 import json
 import secrets
 import time
+import hashlib
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from argon2.low_level import hash_secret_raw, Type
@@ -18,6 +19,40 @@ from schema import valid_identity
 
 SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".zhcrypt", "sessions")
 SESSION_EXPIRE_DAYS = 30
+
+# R3 性能修复: 此前 save_session 每次保存都随机生成新 salt 并重跑一次
+# Argon2id(256MiB) —— 每发/收一条聊天消息 (save+load) 引入约 1-2 秒纯派生
+# 开销。现改为: 会话文件内 salt 固定 (首次创建时随机, 之后沿用文件头里的
+# salt), 并对 (口令指纹, salt) → wrapping key 做进程内缓存。文件格式不变
+# (salt 仍在文件头), 旧版本会话文件完全可读。
+# 安全性: salt 复用仅发生在同一台机器的同一会话文件内, 不损害抗预计算
+# 性质; nonce 每次保存仍随机, GCM 无 nonce 复用风险。
+_DERIVED_KEY_CACHE = {}
+_DERIVED_KEY_CACHE_MAX = 64
+
+
+def _cached_wrapping_key(passphrase, salt):
+    ck = (hashlib.sha256(passphrase.encode("utf-8")).digest(), bytes(salt))
+    key = _DERIVED_KEY_CACHE.get(ck)
+    if key is None:
+        key = derive_key(passphrase, salt)
+        if len(_DERIVED_KEY_CACHE) >= _DERIVED_KEY_CACHE_MAX:
+            _DERIVED_KEY_CACHE.clear()
+        _DERIVED_KEY_CACHE[ck] = key
+    return key
+
+
+def _existing_salt(file_path):
+    """读取既有会话文件头部的 salt; 文件不存在/损坏返回 None。"""
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, "rb") as f:
+                salt = f.read(SALT_SIZE)
+            if len(salt) == SALT_SIZE:
+                return salt
+    except OSError:
+        pass
+    return None
 
 # C1 修复 (Agent-3): 会话文件并发读写锁。
 # save_session 整文件覆写, Binder 解密/主线程发送/文件 worker 可能并发
@@ -74,8 +109,8 @@ def save_session(state, passphrase):
         file_path = _session_path(state.my_identity, state.peer_identity)
 
         plain = json.dumps(state.to_dict(), ensure_ascii=False).encode("utf-8")
-        salt = secrets.token_bytes(SALT_SIZE)
-        wrapping_key = derive_key(passphrase, salt)
+        salt = _existing_salt(file_path) or secrets.token_bytes(SALT_SIZE)
+        wrapping_key = _cached_wrapping_key(passphrase, salt)
         nonce = secrets.token_bytes(NONCE_SIZE)
         aesgcm = AESGCM(wrapping_key)
         ciphertext = aesgcm.encrypt(nonce, plain, None)
@@ -104,7 +139,7 @@ def load_session(my_identity, peer_identity, passphrase):
         nonce = data[SALT_SIZE:SALT_SIZE + NONCE_SIZE]
         ciphertext = data[SALT_SIZE + NONCE_SIZE:]
 
-        wrapping_key = derive_key(passphrase, salt)
+        wrapping_key = _cached_wrapping_key(passphrase, salt)
     aesgcm = AESGCM(wrapping_key)
     try:
         plain = aesgcm.decrypt(nonce, ciphertext, None)

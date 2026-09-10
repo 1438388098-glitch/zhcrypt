@@ -626,7 +626,13 @@ def cmd_restore(args):
 
 def cmd_strength(args):
     from strength import get_strength
-    if args.password:
+    if getattr(args, "stdin", False):
+        # R3: 管道输入, 供脚本使用 (避免密码进 shell 历史)
+        pwd = sys.stdin.readline().rstrip("\r\n")
+        if not pwd:
+            _err("--stdin 未收到密码输入")
+            return
+    elif args.password:
         pwd = args.password
     else:
         pwd = getpass.getpass(f"  {S.BOLD}▶{S.RESET} 输入要测试的密码: ")
@@ -1171,7 +1177,11 @@ def main():
     p_restore.add_argument("identity", nargs="?", default="default")
 
     p_strength = sub.add_parser("strength")
-    p_strength.add_argument("password", nargs="?", default=None)
+    p_strength.add_argument("password", nargs="?", default=None,
+                            help="[不建议] 明文密码会进入 shell 历史; "
+                                 "省略此参数交互输入, 或用 --stdin")
+    p_strength.add_argument("--stdin", action="store_true",
+                            help="从 stdin 读取密码 (供脚本管道使用)")
 
     p_params = sub.add_parser("set-params")
     p_params.add_argument("--time", type=int, default=None)

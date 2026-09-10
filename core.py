@@ -520,53 +520,44 @@ def b64_to_packet(b64_string: str) -> bytes:
 
 
 def encrypt_file_password_mode(filepath: str, password: str, output_path: str = None):
-    """密码模式加密文件"""
-    with open(filepath, "rb") as f:
-        plaintext = f.read()
+    """密码模式加密文件 (R3: 委托流式实现, 大文件不再整读内存)。
 
-    salt = secrets.token_bytes(SALT_SIZE)
-    key = derive_key(password, salt)
-    nonce = secrets.token_bytes(NONCE_SIZE)
-
-    aesgcm = AESGCM(key)
-    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-
-    params = struct.pack(">III", ARGON2_TIME_COST, ARGON2_MEMORY_COST, ARGON2_PARALLELISM)
-
-    packet = bytearray()
-    packet.extend(MAGIC)
-    packet.append(VERSION)
-    packet.append(MODE_PASSWORD)
-    packet.extend(params)
-    packet.extend(salt)
-    packet.extend(nonce)
-    packet.extend(ciphertext)
-
-    key_bytes = bytearray(key)
-    _clear_bytes(key_bytes)
-
+    3.1.0 及之前产出单块 MODE_PASSWORD(0x01) 格式, 整文件读入内存, 大文件
+    会内存耗尽; 现改产 MODE_FILE_STREAM(0x05) 流式格式, 内存占用 ≈ 单块
+    (默认 64KiB)。输出文件名约定不变 (默认 <name>.zhe);
+    decrypt_file_password_mode 按头部 mode 自动分派, 新旧格式均可解。
+    注意: 旧版程序无法识别新格式 (仅保证向前兼容旧文件)。
+    """
     if output_path is None:
         output_path = filepath + ".zhe"
-
-    with open(output_path, "wb") as f:
-        f.write(bytes(packet))
-
-    return output_path
+    return encrypt_file_stream(filepath, password, output_path=output_path)
 
 
 def decrypt_file_password_mode(filepath: str, password: str, output_path: str = None,
                                overwrite: bool = False):
-    """密码模式解密文件"""
+    """密码模式解密文件 (R3: 按头部 mode 自动分派新旧格式)"""
     with open(filepath, "rb") as f:
-        packet = f.read()
+        header = f.read(8)
 
-    if packet[:4] != MAGIC:
+    if len(header) >= 6 and header[:4] == MAGIC and header[5] == MODE_FILE_STREAM:
+        # 新格式: 流式解密; 输出名沿用密码模式的命名约定
+        if output_path is None:
+            if filepath.endswith(".zhe"):
+                output_path = filepath[:-4]
+            else:
+                output_path = filepath + ".dec"
+        return decrypt_file_stream(filepath, password, output_path=output_path,
+                                   overwrite=overwrite)
+
+    if header[:4] != MAGIC:
         raise ValueError("不是 zhcrypt 加密文件")
 
-    version = packet[4]
-    mode = packet[5]
+    mode = header[5]
     if mode != MODE_PASSWORD:
         raise ValueError("文件不是密码模式加密")
+
+    with open(filepath, "rb") as f:
+        packet = f.read()
 
     offset = 6
     params_end = offset + 12
@@ -725,39 +716,9 @@ def _x25519_exchange_checked(private_key, public_key) -> bytes:
     return shared
 
 
-def x3dh_shared_secret(
-    sender_eph_priv_pem: bytes,
-    sender_longterm_priv_pem: bytes,
-    receiver_identity_pub_pem: bytes,
-    receiver_signed_prekey_pub_pem: bytes,
-    receiver_one_time_pub_pem: bytes = None,
-) -> bytes:
-    """
-    三重 DH (X3DH) 计算主共享秘密
-
-    DH1 = ECDH(sender_eph,          receiver_signed_prekey)
-    DH2 = ECDH(sender_longterm,     receiver_identity)
-    DH3 = ECDH(sender_eph,          receiver_identity)     (可选的)
-
-    主密钥 = HKDF-SHA256(DH1 || DH2 || DH3 || AD)
-
-    返回 32 字节共享密钥
-    """
-    dh1 = x25519_ecdh(sender_eph_priv_pem, receiver_signed_prekey_pub_pem)
-    dh2 = x25519_ecdh(sender_longterm_priv_pem, receiver_identity_pub_pem)
-
-    dh3 = b""
-    if receiver_one_time_pub_pem:
-        dh3 = x25519_ecdh(sender_eph_priv_pem, receiver_one_time_pub_pem)
-
-    master = HKDF(
-        algorithm=hashes.SHA256(),
-        length=KEY_SIZE,
-        salt=b"zhcrypt-x3dh-v1",
-        info=b"x3dh-master-key",
-    ).derive(dh1 + dh2 + dh3)
-
-    return master
+# R3 清理: 删除无任何调用方的 x3dh_shared_secret (core 旧版 X3DH, salt=-v1,
+# DH 组合与聊天实际使用的 ratchet.x3dh_* -v2 不一致, 属易误用的双轨死代码)。
+# 聊天协议的 X3DH 见 ratchet.py x3dh_initiate_session / x3dh_complete_session。
 
 
 # ============================================================

@@ -391,8 +391,7 @@ class ZhCryptGUI:
             if mode in (3, 4):
                 # 问题5 修复：路由无关解密。混合格式密文统一引导到「混合模式」标签，
                 # 自动复制密文并切换，不再让用户自己找入口。
-                self.root.clipboard_clear()
-                self.root.clipboard_append(cipher)
+                self._copy_to_clipboard(cipher)
                 self.notebook.select(self.tab_hybrid)
                 messagebox.showinfo("已切换解密入口",
                     "检测到这是【公钥·混合】密文，已为你切换到「混合模式」标签，\n"
@@ -434,12 +433,24 @@ class ZhCryptGUI:
         except Exception as e:
             messagebox.showerror("错误", f"解密失败: {e}")
 
+    def _copy_to_clipboard(self, text, clear_after_ms=60000):
+        """复制到剪贴板, 默认 60 秒后自动清空 (R3: 防明文/密文常驻剪贴板)。"""
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        if clear_after_ms:
+            def _auto_clear():
+                try:
+                    if self.root.clipboard_get() == text:
+                        self.root.clipboard_clear()
+                except Exception:
+                    pass  # 剪贴板被占用/内容已被替换时不必处理
+            self.root.after(clear_after_ms, _auto_clear)
+
     def _on_copy_output(self):
         text = self.text_output.get("1.0", "end-1c").strip()
         if text:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self._set_status("已复制到剪贴板", 3000)
+            self._copy_to_clipboard(text)
+            self._set_status("已复制到剪贴板 (60 秒后自动清空)", 3000)
 
     def _on_clear_text(self):
         self.text_input.delete("1.0", tk.END)
@@ -1059,9 +1070,8 @@ class ZhCryptGUI:
     def _on_hybrid_copy(self):
         text = self.hybrid_output.get("1.0", "end-1c").strip()
         if text:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self._set_status("已复制到剪贴板", 3000)
+            self._copy_to_clipboard(text)
+            self._set_status("已复制到剪贴板 (60 秒后自动清空)", 3000)
 
     def _on_export_bundle(self):
         identity = self.current_identity_var.get()
@@ -1090,8 +1100,7 @@ class ZhCryptGUI:
         except Exception as e:
             messagebox.showerror("错误", str(e))
             return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(bundle)
+        self._copy_to_clipboard(bundle)
         self._set_status(f"已导出并复制 {identity} 的公钥束 (含身份, 对方可自动识别)", 4000)
 
     def _on_import_bundle(self):
@@ -2210,6 +2219,11 @@ class ZhCryptGUI:
                 self._chat_client.stop()
             except Exception:
                 pass
+        # R3: 退出时清空剪贴板与输出区, 减少敏感内容残留
+        try:
+            self.root.clipboard_clear()
+        except Exception:
+            pass
         self.root.destroy()
 
     def run(self):

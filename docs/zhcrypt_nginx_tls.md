@@ -59,7 +59,8 @@ location /v1/chat {
 
 ## 方案二：原生 TLS（无 Nginx，仅小规模/测试用）
 
-`server.py` 已支持通过环境变量直接启用 HTTPS：
+`server.py` 已通过 `ZHPREKEY_TLS_CERT/ZHPREKEY_TLS_KEY` 环境变量支持原生 HTTPS
+（两个文件都存在才启用，缺失时以明文 HTTP 启动并在日志警告）：
 
 ```bash
 export ZHPREKEY_TLS_CERT=/path/fullchain.pem
@@ -70,6 +71,10 @@ python server.py
 
 > 注意：`chat_server.py`（WebSocket）仍走 ws，需另行在前面加 TLS 终止层
 > （Nginx 或 stunnel）。**生产环境强烈建议用方案一（Nginx 统一终止 TLS）**。
+>
+> 直连（无反代）部署请同时设 `ZHPREKEY_TRUST_PROXY=0`：限流默认信任
+> `X-Real-IP` 头，直连时该头可被客户端伪造绕过限流；设为 0 后一律按
+> 实际连接 IP 计数。
 
 ---
 

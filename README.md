@@ -60,6 +60,8 @@ HKDF salt 随机化、Shamir 标准安全质数。
 - 生产环境必须启用 HTTPS/WSS + 证书固定:
   `zhcrypt set-server https://你的域名 --token <tok> --pin <指纹>`
 - 服务器认证令牌仅经环境变量 `ZHPREKEY_TOKEN` 注入, 严禁提交到版本库。
+- 5000 端口直连暴露 (无 Nginx) 时必须设 `ZHPREKEY_TRUST_PROXY=0`,
+  否则客户端可伪造 `X-Real-IP` 绕过消息限流 (默认 1 为反代部署保持兼容)。
 
 ## 构建
 
