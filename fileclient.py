@@ -226,12 +226,12 @@ class FileClient:
             self._maybe_progress(progress_cb, server_size, server_size)
             return {"path": dest, "size": local_size}
 
-        # 3) Range 请求续传剩余部分
+        # 3) Range 请求续传剩余部分 (R16: 分块流式写盘, 响应不再整段进内存)
         req_headers = self._auth_headers()
         if local_size > 0:
             req_headers["Range"] = f"bytes={local_size}-"
         try:
-            status, headers, body = self._http_raw(
+            status, headers, reader = self._http_stream(
                 "GET", url, headers=req_headers)
         except FileClientError as e:
             return {"error": f"下载网络错误: {e}"}
@@ -240,37 +240,69 @@ class FileClient:
         if status not in (200, 206):
             return {"error": f"下载失败: HTTP {status}"}
 
-        if status == 206 and local_size > 0:
-            # 部分内容: 追加写
+        append = status == 206 and local_size > 0
+        if append:
             content_range = headers.get("Content-Range", "")
-            # 校验起始偏移与服务端协商一致 (格式: bytes start-end/total)
             m = re.match(r"bytes\s+(\d+)-", content_range)
             if m and int(m.group(1)) != local_size:
                 return {"error": "服务端 Range 响应偏移不匹配, 放弃续传"}
-            try:
-                with open(dest, "ab") as f:
-                    f.write(body)
-            except OSError as e:
-                # R11: 磁盘满/权限错误此前裸穿透, 违反 {"error": 中文} 契约
-                return {"error": f"写盘失败: {e}"}
-        else:
-            # 200 整文件: 覆盖写
-            try:
-                with open(dest, "wb") as f:
-                    f.write(body)
-            except OSError as e:
-                return {"error": f"写盘失败: {e}"}
-            local_size = 0
-            if status == 206:
-                local_size = 0  # 无 Range 请求但返回 206, 以整文件计
 
-        final_size = local_size + len(body)
+        base = local_size if append else 0
+        received = 0
+        try:
+            with open(dest, "ab" if append else "wb") as f:
+                while True:
+                    chunk = reader.read(64 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    received += len(chunk)
+                    self._maybe_progress(progress_cb, base + received,
+                                         server_size)
+        except OSError as e:
+            # R11: 磁盘满/权限错误此前裸穿透, 违反 {"error": 中文} 契约
+            return {"error": f"写盘失败: {e}"}
+        finally:
+            try:
+                reader.close()
+            except Exception:
+                pass
+
+        final_size = os.path.getsize(dest)
         # 服务端 size 若与已下载不符, 提示 (不强制失败, 由调用方校验 sha256)
         if final_size != server_size:
-            # 尝试补齐: 简单起见直接报错, 让调用方重试
             return {"error": f"下载不完整: 本地 {final_size} != 服务端 {server_size}"}
         self._maybe_progress(progress_cb, final_size, final_size)
         return {"path": dest, "size": final_size}
+
+    def _http_stream(self, method, url, headers=None, timeout=60):
+        """R16: 流式请求 —— 返回 (status, headers, reader), reader 支持
+        分块 read(n)。download 用它消费 GET 响应, 单文件最大 2GB 时不再
+        整段缓冲进内存。"""
+        import http.client
+        import ssl
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        if p.scheme == "https":
+            conn = http.client.HTTPSConnection(
+                p.hostname, p.port or 443, timeout=timeout,
+                context=ssl.create_default_context())
+        else:
+            conn = http.client.HTTPConnection(
+                p.hostname, p.port or 80, timeout=timeout)
+        try:
+            conn.request(method, p.path + (f"?{p.query}" if p.query else ""),
+                         headers=headers or {})
+            resp = conn.getresponse()
+            # 注意: 不在此处关闭连接 —— resp 的读取发生在调用方;
+            # 调用方读完负责 reader.close()。
+            return resp.status, dict(resp.getheaders()), resp
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # 元信息

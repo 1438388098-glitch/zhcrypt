@@ -32,6 +32,15 @@ from session import save_session, load_session, list_sessions, delete_session, s
 INBOUND = queue.Queue()
 OUTBOUND = queue.Queue()
 
+# R16: 可选调试日志 —— ZHCRYPT_DEBUG=1 时输出连接/重试/收发事件到 stderr,
+# 便于排障; 默认完全静默 (不打扰正常使用, 也不泄露内容, 只输出事件元信息)。
+_DEBUG = bool(os.environ.get("ZHCRYPT_DEBUG"))
+
+
+def _dbg(msg):
+    if _DEBUG:
+        print(f"[zhcrypt-debug] {msg}", file=sys.stderr)
+
 
 def build_ws_sslopt(ws_url):
     """为 wss 连接构造启用证书校验的 sslopt (审计 #3/#4)。
@@ -232,6 +241,7 @@ class ChatClient:
                 self._ws_ready = True
                 self._connected = True
                 reported_error = False
+                _dbg("ws connected")
                 self.inbound.put({"action": "status", "connected": True})
 
                 # 3s socket timeout keeps connections alive while allowing
@@ -250,6 +260,7 @@ class ChatClient:
                             data = _json.loads(raw)
                         except _json.JSONDecodeError:
                             continue
+                        _dbg(f"ws recv id={data.get('id', '?')[:8]} type={data.get('type', '?')}")
                         self.inbound.put({"action": "server_message", "data": data})
                     except (_socket.timeout, _WSTE):
                         pass
@@ -292,11 +303,13 @@ class ChatClient:
             except Exception as e:
                 if not reported_error:
                     # M17 修复: 常见异常映射为中文短句, 不把 traceback 糊给用户
+                    _dbg(f"ws error: {e}")
                     self.inbound.put({"action": "error", "message": _friendly_conn_error(e)})
                     reported_error = True
 
             self._connected = False
             self._ws_ready = False
+            _dbg("ws disconnected")
             self.inbound.put({"action": "status", "connected": False})
 
             if self._running:

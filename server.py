@@ -55,6 +55,15 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 
+@app.after_request
+def _security_headers(resp):
+    # R16: 基础响应安全头 (API 服务也不应被浏览器嗅探/嵌入/缓存)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
+
+
 @app.errorhandler(413)
 def _request_too_large(e):
     return jsonify({"error": "payload too large"}), 413

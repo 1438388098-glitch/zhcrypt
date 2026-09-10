@@ -97,6 +97,18 @@ class MockDownloadServer:
         return 200, {}, self.data
 
 
+def patch_stream(monkeypatch, server):
+    """R16: download 的 GET 已改走 _http_stream(分块读), 测试桩同步:
+    复用同一假服务器, 把整包 body 包成 BytesIO 读取器。"""
+    import io
+
+    def _stream(self, method, url, headers=None):
+        status, headers2, body = server.handle(method, url, headers)
+        return status, headers2, io.BytesIO(body)
+
+    monkeypatch.setattr(FileClient, "_http_stream", _stream)
+
+
 @pytest.fixture
 def fc(monkeypatch):
     client = make_client()
@@ -116,6 +128,7 @@ def test_upload_success(monkeypatch, tmp_path):
                                (409, {"offset": 2 * CHUNK_SIZE}),
                                (201, {"token": "t0" * 16})])
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
 
     result = FileClient("https://example.com", "tok123").upload(str(p), "bob")
 
@@ -138,6 +151,7 @@ def test_upload_resume_alignment(monkeypatch, tmp_path):
     server = MockUploadServer([(409, {"offset": resume_at}),
                                (201, {"token": "r1" * 16})])
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
 
     result = FileClient("https://example.com", "tok123").upload(str(p), "bob")
 
@@ -153,6 +167,7 @@ def test_upload_failure_500(monkeypatch, tmp_path):
     p.write_bytes(b"x" * 100)
     server = MockUploadServer([(500, {"error": "internal"})])
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
 
     result = FileClient("https://example.com", "tok123").upload(str(p), "bob")
 
@@ -166,6 +181,7 @@ def test_upload_stall_guard(monkeypatch, tmp_path):
     p.write_bytes(b"x" * (CHUNK_SIZE + 10))
     server = MockUploadServer([(409, {"offset": 0})])
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
 
     result = FileClient("https://example.com", "tok123").upload(str(p), "bob")
 
@@ -177,6 +193,7 @@ def test_upload_stall_guard(monkeypatch, tmp_path):
 def test_upload_missing_file(monkeypatch, tmp_path):
     server = MockUploadServer([])
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
     result = FileClient("https://example.com", "tok123").upload(
         str(tmp_path / "nope.bin"), "bob")
     assert result["error"]
@@ -207,6 +224,7 @@ def test_download_fresh(monkeypatch, tmp_path):
     token = "b" * 32
     server = MockDownloadServer(cipher, token=token)
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
     dest = tmp_path / "dl"
     dest.mkdir()
 
@@ -231,6 +249,7 @@ def test_download_resume_append(monkeypatch, tmp_path):
     target.write_bytes(partial)
     server = MockDownloadServer(cipher, token=token)
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
 
     result = FileClient("https://example.com", "tok123").download(token, str(dest))
 
@@ -250,6 +269,7 @@ def test_download_server_ignores_range(monkeypatch, tmp_path):
     target.write_bytes(b"stale-partial-data")
     server = MockDownloadServer(cipher, token=token, range_support=False)
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
 
     result = FileClient("https://example.com", "tok123").download(token, str(dest))
 
@@ -260,6 +280,7 @@ def test_download_server_ignores_range(monkeypatch, tmp_path):
 def test_download_missing_dest_dir(monkeypatch, tmp_path):
     server = MockDownloadServer(b"data", token="e" * 32)
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
     result = FileClient("https://example.com", "tok123").download(
         "e" * 32, str(tmp_path / "no_such_dir"))
     assert result["error"]
@@ -277,6 +298,10 @@ def test_download_404(monkeypatch, tmp_path):
         return 404, {}, b""
 
     monkeypatch.setattr(FileClient, "_http_raw", staticmethod(not_found))
+    import io as _io
+    monkeypatch.setattr(FileClient, "_http_stream",
+                        staticmethod(lambda self, method, url, headers=None:
+                                     (404, {}, _io.BytesIO(b""))))
     result = FileClient("https://example.com", "tok123").download("f" * 32, str(dest))
     assert result["error"] == "not found"
 
@@ -341,6 +366,7 @@ def test_progress_throttle_frozen_clock(monkeypatch, tmp_path):
                                (409, {"offset": 2 * CHUNK_SIZE}),
                                (201, {"token": "t1" * 16})])
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
     freeze_clock(monkeypatch, step=0.0)
 
     calls = []
@@ -362,6 +388,7 @@ def test_progress_throttle_advancing_clock(monkeypatch, tmp_path):
                                (409, {"offset": 2 * CHUNK_SIZE}),
                                (201, {"token": "t2" * 16})])
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
     freeze_clock(monkeypatch, step=2.0)
 
     calls = []
@@ -382,14 +409,18 @@ def test_progress_cb_download(monkeypatch, tmp_path):
     dest.mkdir()
     server = MockDownloadServer(cipher, token=token)
     monkeypatch.setattr(FileClient, "_http_raw", server.handle)
+    patch_stream(monkeypatch, server)
 
     calls = []
     result = FileClient("https://example.com", "tok123").download(
         token, str(dest), progress_cb=lambda d, t: calls.append((d, t)))
 
     assert result["size"] == len(cipher)
-    assert len(calls) == 1
-    assert calls[0] == (len(cipher), len(cipher))
+    # R16: 流式下载按块回报进度 (至少一次), 单调递增且最后一次为完成值
+    assert len(calls) >= 1
+    sizes = [d for d, _ in calls]
+    assert sizes == sorted(sizes)
+    assert calls[-1] == (len(cipher), len(cipher))
 
 
 # ----------------------------------------------------------------------
@@ -415,6 +446,16 @@ def test_upload_download_e2e_consistency(monkeypatch, tmp_path):
         return 409, {}, json.dumps({"offset": offset + len(body)}).encode("utf-8")
 
     monkeypatch.setattr(FileClient, "_http_raw", staticmethod(upload_server))
+
+    import io as _io
+
+    def _stream_dl(self, method, url, headers=None):
+        # R16: 委托当前 _http_raw (本测试各阶段会重挂), 整包包成 BytesIO
+        status, hdrs, body = FileClient._http_raw(method, url, headers=headers)
+        return status, hdrs, _io.BytesIO(body)
+
+    monkeypatch.setattr(FileClient, "_http_stream", _stream_dl)
+
     result = FileClient("https://example.com", "tok123").upload(str(p), "bob")
     assert result == {"token": token}
     assembled = b"".join(buf[k] for k in sorted(buf))
@@ -928,6 +969,14 @@ def test_send_file_to_wire_roundtrip(monkeypatch, tmp_path):
     dest.mkdir()
     cipher_assembled["data"] = cipher
     monkeypatch.setattr(fileclient.FileClient, "_http_raw", staticmethod(download_server))
+    import io as _io2
+
+    def _stream_dl(self, method, url, headers=None):
+        status, hdrs, body = fileclient.FileClient._http_raw(
+            method, url, headers=headers)
+        return status, hdrs, _io2.BytesIO(body)
+
+    monkeypatch.setattr(fileclient.FileClient, "_http_stream", _stream_dl)
     dl = client.download_file(token, str(dest))
     assert dl["status"] == "ok"
 

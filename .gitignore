@@ -36,3 +36,9 @@ _*.py
 
 # 编码乱码残留文件
 绯荤粲
+
+# R16: 构建与运行时遗漏项
+packaging/Output/
+packaging/buildenv/
+*.corrupt
+.build_token

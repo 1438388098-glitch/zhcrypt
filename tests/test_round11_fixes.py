@@ -178,6 +178,14 @@ def test_download_write_failure_returns_error(tmp_path, monkeypatch):
         return 200, {"Content-Length": "4"}, b"abcd"
 
     monkeypatch.setattr(FileClient, "_http_raw", _fake_raw)
+    # R16: GET 改走 _http_stream, 桩同步 (HEAD 仍走 _http_raw)
+    import io as _io
+
+    def _fake_stream(self, method, url, headers=None):
+        calls.append(method)
+        return 200, {"Content-Length": "4"}, _io.BytesIO(b"abcd")
+
+    monkeypatch.setattr(FileClient, "_http_stream", _fake_stream)
     # dest = dest_dir/<token>.bin: 用同名目录占用, open("wb") 必抛 OSError
     (tmp_path / "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bin").mkdir()
     r = fc.download("a" * 32, str(tmp_path))

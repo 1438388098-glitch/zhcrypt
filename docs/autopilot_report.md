@@ -48,6 +48,14 @@
 | TUI 冒烟 / 登录屏 | 44+31 | `py -3.13 -m pytest tests/test_tui_smoke.py` 等 |
 | 本地双端 E2E | 13 检查 | `py -3.13 tests/e2e_local_smoke.py` |
 | 依赖审计 | 双 lock | `pip-audit -r requirements-{client,server}.lock.txt` |
+| 会话锁并发压测 | 8×25 | `py -3.13 -m pytest tests/test_session_lock_stress.py` |
+
+## 稳定性策略（R15 教训）
+
+O_BINARY 一类缺陷表现为「全量连跑中的低概率顺序性偶发」。回归策略:
+任何涉及随机字节/文件系统/线程的修复, 合入前至少 **三连跑全量 pytest**
+(2026-09-11 已执行, 三次 exit=0); CI 侧建议对 windows runner 保持
+每日一次的定时全量跑。另: 全仓 TODO/FIXME 标记清点为 0。
 
 ## 遗留（协议级，建议下个大版本）
 
