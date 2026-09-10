@@ -409,11 +409,19 @@ def cmd_import_bundle(args):
 
 def cmd_delete(args):
     store = KeyStore()
+    identity = args.identity
+    # R5: 物理删除全部密钥 (私钥不可恢复) 前必须确认; -y 供脚本跳过
+    if not getattr(args, "yes", False):
+        answer = input(f"  将永久删除身份 '{identity}' 的全部密钥 (不可恢复)。\n"
+                       f"  输入身份名以确认: ").strip()
+        if answer != identity:
+            _err("确认输入不匹配, 已取消")
+            return
     try:
-        removed = store.delete_identity(args.identity)
+        removed = store.delete_identity(identity)
         for p in removed:
             _dim(f"已删除: {os.path.basename(p)}")
-        _ok(f"身份 '{args.identity}' 已删除")
+        _ok(f"身份 '{identity}' 已删除")
     except Exception as e:
         _err(str(e))
 
@@ -954,6 +962,12 @@ def cmd_chat_delete(args):
     from config import get
     identity = args.identity or get("default_identity", "default")
     peer = args.peer
+    # R5: 删除会话前确认; -y 供脚本跳过
+    if not getattr(args, "yes", False):
+        answer = input(f"  将删除与 {peer} 的加密会话 (需重新握手)。确认? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            _err("已取消")
+            return
     from session import delete_session
     delete_session(identity, peer)
     _ok(f"已删除与 {peer} 的会话")
@@ -1172,6 +1186,8 @@ def main():
 
     p_del = sub.add_parser("delete")
     p_del.add_argument("identity")
+    p_del.add_argument("-y", "--yes", action="store_true",
+                       help="跳过确认 (供脚本使用)")
 
     sub.add_parser("info")
 
@@ -1231,6 +1247,8 @@ def main():
     p_chat_delete = sub.add_parser("chat-delete")
     p_chat_delete.add_argument("-t", "--peer", required=True)
     p_chat_delete.add_argument("-i", "--identity", default=None)
+    p_chat_delete.add_argument("-y", "--yes", action="store_true",
+                               help="跳过确认 (供脚本使用)")
 
     p_chat_safety = sub.add_parser("chat-safety")
     p_chat_safety.add_argument("-t", "--peer", required=True)

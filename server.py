@@ -43,6 +43,7 @@ from schema import (
     MESSAGES_IDX_RECIPIENT_SQL,
     MESSAGES_IDX_SESSION_SQL,
     MESSAGES_IDX_SERVER_TS_SQL,
+    MESSAGES_IDX_PAIR_SQL,
     FILES_TABLE_SQL,
     add_column,
     valid_identity,
@@ -217,6 +218,7 @@ def init_db():
     db.execute(MESSAGES_IDX_RECIPIENT_SQL)
     db.execute(MESSAGES_IDX_SESSION_SQL)
     db.execute(MESSAGES_IDX_SERVER_TS_SQL)
+    db.execute(MESSAGES_IDX_PAIR_SQL)
     db.execute(FILES_TABLE_SQL)
     # R4: OTP 去重迁移 + 唯一索引 (防同一 one-time prekey 被消耗两次)
     db.execute(PREKEYS_UNIQ_DEDUPE_SQL)
@@ -230,6 +232,9 @@ def require_auth(f):
     def decorated(*args, **kwargs):
         token = request.headers.get("Authorization", "").replace("Bearer ", "")
         if not hmac.compare_digest(token, AUTH_TOKEN):
+            # R5: 认证失败是安全事件, 记录来源便于发现爆破/冒用
+            app.logger.warning(
+                "auth failed ip=%s path=%s", _client_ip(), request.path)
             return jsonify({"error": "unauthorized"}), 401
         return f(*args, **kwargs)
     return decorated
@@ -252,10 +257,19 @@ def _hash_key(identity, key_data):
 
 @app.route("/v1/health", methods=["GET"])
 def health():
+    # R5: 健康检查实际探测 DB (锁死/损坏时不再误报健康);
+    # 移除版本字段, 减少未鉴权信息面。
+    db_ok = True
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("SELECT 1")
+        db.close()
+    except sqlite3.Error:
+        db_ok = False
     return jsonify({
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
+        "db": "ok" if db_ok else "error",
         "time": _now(),
-        "version": "1.0.0",
         "server": "zhcrypt-prekey-server",
     })
 
@@ -310,6 +324,10 @@ def upload_prekey(identity):
         key_changed = (new_signing and old_signing and new_signing != old_signing) or \
                       (new_idk and old_idk and new_idk != old_idk)
         if key_changed:
+            # R5: 疑似冒充/换钥是最值得告警的安全事件
+            app.logger.warning(
+                "identity key mismatch (suspected impersonation) identity=%s ip=%s",
+                identity, _client_ip())
             return jsonify({"error": "身份公钥与已注册身份不一致（疑似冒充或换钥），请先删除该身份后重新注册"}), 403
 
     db.execute("""
@@ -718,18 +736,23 @@ def message_history():
         return jsonify({"error": "identity and with required"}), 400
 
     db = get_db()
+    # R5 修复: Windows 计时粒度 (~15ms) 下同批消息 server_ts 可能相同,
+    # 仅按 server_ts 比较会整页丢失; 以 rowid 作为稳定次序决胜字段。
     if before_id:
         rows = db.execute("""
             SELECT * FROM messages
             WHERE ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))
-              AND server_ts < (SELECT server_ts FROM messages WHERE id = ?)
-            ORDER BY server_ts DESC LIMIT ?
-        """, (identity, peer, peer, identity, before_id, limit)).fetchall()
+              AND (server_ts < (SELECT server_ts FROM messages WHERE id = ?)
+                   OR (server_ts = (SELECT server_ts FROM messages WHERE id = ?)
+                       AND rowid < (SELECT rowid FROM messages WHERE id = ?)))
+            ORDER BY server_ts DESC, rowid DESC LIMIT ?
+        """, (identity, peer, peer, identity,
+              before_id, before_id, before_id, limit)).fetchall()
     else:
         rows = db.execute("""
             SELECT * FROM messages
             WHERE (sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)
-            ORDER BY server_ts DESC LIMIT ?
+            ORDER BY server_ts DESC, rowid DESC LIMIT ?
         """, (identity, peer, peer, identity, limit)).fetchall()
 
     msgs = []
@@ -980,13 +1003,21 @@ def message_delivered():
 
 
 def cleanup_expired():
-    """清理过期未消耗 prekeys (可设置定时任务)。返回删除条数。"""
+    """清理过期 prekeys (可设置定时任务)。返回删除条数。
+
+    R5: 同时回收已消耗的 OTP (保留 1 天供排障) —— 原实现只删未消耗的,
+    consumed=1 的行永久留存导致 prekeys 表只增不减。
+    """
     db = sqlite3.connect(DB_PATH)
     db.execute("PRAGMA busy_timeout=5000")
     cutoff = _now() - PREKEY_EXPIRE_DAYS * 86400
     cur = db.execute("DELETE FROM prekeys WHERE created_at < ? AND consumed = 0",
                      (cutoff,))
     deleted = cur.rowcount
+    consumed_cutoff = _now() - 86400
+    cur2 = db.execute("DELETE FROM prekeys WHERE consumed = 1 AND consumed_at < ?",
+                      (consumed_cutoff,))
+    deleted += cur2.rowcount
     db.commit()
     db.close()
     return deleted

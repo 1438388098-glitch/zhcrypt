@@ -77,7 +77,9 @@ WorkingDirectory=/opt/zhcrypt-server
 Environment=ZHPREKEY_TOKEN=your-token-here
 Environment=ZHPREKEY_DB=/opt/zhcrypt-server/zhprekey.db
 Environment=ZHPREKEY_EXPIRE_DAYS=7
-ExecStart=/opt/zhcrypt-server/venv/bin/gunicorn -w 2 -b 127.0.0.1:5000 server:app
+# R5: 必须 -w 1 —— 上传会话/限流桶均为进程内状态, 多 worker 会绕过
+# 并发与限流约束; 用线程扩展并发。
+ExecStart=/opt/zhcrypt-server/venv/bin/gunicorn -w 1 --threads 8 -b 127.0.0.1:5000 server:app
 Restart=always
 RestartSec=5
 

@@ -120,13 +120,31 @@ def set_key(key_path, value):
 
 
 def _load_device_key():
-    """读取或生成本机设备密钥 (32 字节), 用于加密 Auth Token (审计 #8)。"""
+    """读取或生成本机设备密钥 (32 字节), 用于加密 Auth Token (审计 #8)。
+
+    R5: 既有 device.key 损坏 (长度不对/读取失败) 时不再静默覆盖 —— 先改名
+    备份 (.corrupt) 并 stderr 显式告警: 旧设备密钥加密的 auth_token_enc 与
+    file_keys 将不可解, 用户需要重新配置 token。
+    """
     ensure_config_dir()
     if os.path.exists(DEVICE_KEY_PATH):
-        with open(DEVICE_KEY_PATH, "rb") as f:
-            key = f.read()
+        key = b""
+        try:
+            with open(DEVICE_KEY_PATH, "rb") as f:
+                key = f.read()
+        except OSError:
+            key = b""
         if len(key) == 32:
             return key
+        try:
+            os.replace(DEVICE_KEY_PATH, DEVICE_KEY_PATH + ".corrupt")
+        except OSError:
+            pass
+        print(f"[zhcrypt] 警告: device.key 损坏 (长度 {len(key)}), "
+              f"已备份为 device.key.corrupt 并重新生成;\n"
+              f"[zhcrypt] 旧设备密钥加密的 auth_token_enc 与本地 file_keys "
+              f"将无法解密, 请重新执行 zhcrypt set-server 配置 token。",
+              file=sys.stderr)
     key = secrets.token_bytes(32)
     fd = os.open(DEVICE_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:

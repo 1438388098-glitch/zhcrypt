@@ -533,16 +533,26 @@ class KeyStore:
 
         返回状态: "imported" (新导入) | "exists_same" (已存在且公钥相同) | "imported_legacy" (旧版)
         display_name: 仅本地显示的备注 (不影响路由, 路由恒用 identity)
+
+        R5 修复: 载荷带 v3 束类型标记但解析失败 (缺字段/跨版本损坏) 时,
+        明确抛 ValueError, 不再静默降级把整段 base64 当 RSA 公钥写入
+        <name>.pub (后续加密才报模糊错误)。
         """
         from core import urlsafe_b64decode
         import base64
+        bundle = None
         try:
             decoded = base64.urlsafe_b64decode(encoded.encode("ascii"))
             bundle = json.loads(decoded.decode("utf-8"))
-            if bundle.get("type") == "zhcrypt_public_key_bundle":
-                return self._do_import_bundle(bundle, identity, display_name)
         except Exception:
-            pass
+            bundle = None
+        if isinstance(bundle, dict) and bundle.get("type") == "zhcrypt_public_key_bundle":
+            try:
+                return self._do_import_bundle(bundle, identity, display_name)
+            except KeyError as e:
+                raise ValueError(f"公钥束损坏: 缺少字段 {e}") from e
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"公钥束损坏或版本不支持: {e}") from e
         self.import_public_key_b64(encoded, identity, display_name)
         return "imported_legacy"
 
@@ -645,8 +655,8 @@ class KeyStore:
 
     @_validate_identity_arg
     def import_peer_static_keys(self, identity: str, idk_b64: str = None,
-                                spk_b64: str = None, signing_b64: str = None):
-        """自动导入对端静态公钥 (覆盖写, 不抛异常)。
+                                spk_b64: str = None, signing_b64: str = None) -> dict:
+        """自动导入对端静态公钥 (R5 加固: 三重守卫, 返回 {"updated","skipped"})。
 
         用于『连接时自动拉取对方公钥』(Tier 1 优化): 服务器是证书固定 + token
         双认证的, 其返回的静态公钥可信。与手动 export/import 公钥束不同, 这里
@@ -654,29 +664,61 @@ class KeyStore:
           - identity_key_pub (X25519) -> <peer>.x25519.pub
           - signed_prekey_pub (X25519) -> <peer>.spk.x25519.pub
           - signing_public_key (Ed25519) -> <peer>.ed25519.pub
-        覆盖写而非 FileExistsError, 以便对方重新上传 prekey 后能平滑更新。
+        覆盖写以便对方换 prekey 后平滑更新, 但 R5 加固:
+          1. 对端名与本地身份同名 -> 拒绝 (防覆盖自身公钥);
+          2. 写盘前验证解码结果确为对应类型的合法公钥 (防垃圾/损坏数据落盘);
+          3. 对端已有 TOFU 锚且新签名公钥与锚不一致 -> 跳过签名公钥更新
+             (防服务器被控时静默替换验签锚点), 其余字段照常更新。
         """
         from core import urlsafe_b64decode
 
         base = self.key_dir
+        # 守卫 1: 拒绝覆盖自身
+        if os.path.exists(os.path.join(base, f"{identity}.key")):
+            return {"updated": [], "skipped": ["refused: identity is local"]}
+        if os.path.exists(os.path.join(base, f"{identity}.tofu.ed25519.pub")):
+            tofu = self.load_tofu_signing_pub(identity)
+            if tofu and signing_b64:
+                try:
+                    if urlsafe_b64decode(signing_b64.encode("ascii")) != tofu:
+                        # 守卫 3: 签名公钥与 TOFU 锚不一致, 跳过更新
+                        signing_b64 = None
+                except Exception:
+                    signing_b64 = None
+
         mapping = []
         if idk_b64:
             mapping.append((f"{identity}.x25519.pub",
-                            urlsafe_b64decode(idk_b64.encode("ascii"))))
+                            urlsafe_b64decode(idk_b64.encode("ascii")),
+                            "x25519"))
         if spk_b64:
             mapping.append((f"{identity}.spk.x25519.pub",
-                            urlsafe_b64decode(spk_b64.encode("ascii"))))
+                            urlsafe_b64decode(spk_b64.encode("ascii")),
+                            "x25519"))
         if signing_b64:
             mapping.append((f"{identity}.ed25519.pub",
-                            urlsafe_b64decode(signing_b64.encode("ascii"))))
-        for fn, data in mapping:
+                            urlsafe_b64decode(signing_b64.encode("ascii")),
+                            "ed25519"))
+        updated, skipped = [], []
+        for fn, data, kind in mapping:
+            # 守卫 2: 写盘前验证 PEM 确为对应类型的合法公钥
+            try:
+                if kind == "x25519":
+                    deserialize_x25519_public_key(data)
+                else:
+                    deserialize_ed25519_public_key(data)
+            except Exception:
+                skipped.append(fn)
+                continue
             path = os.path.join(base, fn)
             try:
                 with open(path, "wb") as f:
                     f.write(data)
+                updated.append(fn)
             except Exception:
                 # 单文件失败不应中断其它字段写入
-                pass
+                skipped.append(fn)
+        return {"updated": updated, "skipped": skipped}
 
     @_validate_identity_arg
     def generate_prekey_bundle(self, identity: str, passphrase: str,

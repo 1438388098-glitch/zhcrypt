@@ -74,6 +74,13 @@ MESSAGES_IDX_SERVER_TS_SQL = """
     ON messages(server_ts)
 """
 
+# R5: 双向会话历史查询 ((s=? AND r=?) OR (r=? AND s=?)) 的 sender 侧索引,
+# 消息量增大后避免全表扫描 + 排序。
+MESSAGES_IDX_PAIR_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_messages_pair
+    ON messages(sender, recipient, server_ts)
+"""
+
 FILES_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS files (
         token TEXT PRIMARY KEY,

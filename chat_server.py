@@ -491,7 +491,7 @@ async def cleanup_loop():
             if deleted:
                 log.info(f"[cleanup] deleted {deleted} old messages")
         except Exception as e:
-            log.info(f"[cleanup] error: {e}")
+            log.error(f"[cleanup] error: {e}")
         try:
             # E2 修复: 正式文件保留 30 天 (与消息保留期一致), 仅回收 .part
             # 临时文件 (30 分钟)。cleanup_loop 误删正式文件会导致上传后
@@ -513,8 +513,19 @@ async def cleanup_loop():
                     count += 1
             if count:
                 log.info(f"[cleanup] deleted {count} old files")
+            # R5: files 授权元数据行与磁盘文件同寿命 —— 原实现只删磁盘文件,
+            # 表行只增不减, 过期 token 行还参与下载授权查询。
+            db = _connect()
+            try:
+                fcur = db.execute("DELETE FROM files WHERE server_ts < ?",
+                                  (file_cutoff,))
+                if fcur.rowcount:
+                    log.info(f"[cleanup] deleted {fcur.rowcount} file metadata rows")
+                db.commit()
+            finally:
+                db.close()
         except Exception as e:
-            log.info(f"[cleanup] file error: {e}")
+            log.error(f"[cleanup] file error: {e}")
 
 
 async def main():
