@@ -583,10 +583,19 @@ class ChatClient:
     def _send_via_rest(self, msg):
         msg = dict(msg)
         msg["identity"] = self.identity
-        result = self._http_request("POST", "/v1/messages/send", msg)
-        if result.get("error"):
-            return result["error"]
-        return None
+        # R2: 仅对 429 限流做指数退避重试 (1s/2s/4s, 最多 3 次),
+        # 突发消息不再因限流直接失败; 其它错误立即返回。
+        attempt = 0
+        while True:
+            result = self._http_request("POST", "/v1/messages/send", msg)
+            err = result.get("error") or ""
+            if not err:
+                return None
+            if "429" in err and attempt < 3:
+                time.sleep(2 ** attempt)
+                attempt += 1
+                continue
+            return err
 
     def upload_file(self, file_b64, recipient):
         """通过 WebSocket 上传文件密文 (大文件路径)。

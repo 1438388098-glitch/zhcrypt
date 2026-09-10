@@ -207,9 +207,24 @@ class SessionState:
         return s
 
     def _prune_skipped(self):
+        # R2 修复: 原实现超限即全清, 攻击者一条超大跳变消息就能把既有乱序
+        # 密钥全部清空, 使所有合法乱序消息永久不可解 (选择性拒绝服务)。
+        # 改为逐出消息号最小 (最旧) 的密钥, 直到回落到上限以内。
         total = sum(len(v) for v in self.skipped_keys.values())
-        if total > MAX_SKIPPED:
-            self.skipped_keys.clear()
+        while total > MAX_SKIPPED:
+            fp_min, num_min = None, None
+            for fp, bucket in self.skipped_keys.items():
+                if not bucket:
+                    continue
+                n = min(bucket)
+                if num_min is None or n < num_min:
+                    fp_min, num_min = fp, n
+            if fp_min is None:
+                break
+            del self.skipped_keys[fp_min][num_min]
+            total -= 1
+        for fp in [f for f, b in self.skipped_keys.items() if not b]:
+            del self.skipped_keys[fp]
 
     def _add_skipped(self, ratchet_pub_raw, msg_num, mk):
         fp = self._ratchet_fingerprint(ratchet_pub_raw)

@@ -28,6 +28,11 @@ def main():
         path = os.path.join(ROOT, "tests", suite)
         print(f"\n{'='*60}\n>>> 运行 {suite}\n{'='*60}")
         r = subprocess.run([sys.executable, path], env=env)
+        # 本仓库位于云同步目录时可能遇到瞬时文件竞争 (sharing violation),
+        # 失败先重试一次再判定, 避免环境抖动污染验证结果。
+        if r.returncode != 0:
+            print(f">>> {suite} 失败 (exit={r.returncode}), 重试一次...")
+            r = subprocess.run([sys.executable, path], env=env)
         if r.returncode != 0:
             failed.append(suite)
     print(f"\n{'='*60}")

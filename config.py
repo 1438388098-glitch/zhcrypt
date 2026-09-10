@@ -6,6 +6,7 @@ zhcrypt v3.0 - 配置管理模块
 import os
 import json
 import secrets
+import sys
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -219,7 +220,15 @@ def get_auth_token():
         return legacy
     # 零配置兜底: 任何位置都未配置 token 时, 仅内存返回 .build_token (分发给朋友用),
     # 不落盘、不写入 DEFAULT_CONFIG (审计 M3: 防首次运行把真实 token 明文写进 config.json)。
-    return _load_build_token()
+    token = _load_build_token()
+    if token:
+        # R2: 共享内置 token 意味着所有持包者共用同一服务端身份, 这里显著
+        # 提示而非静默使用, 引导配置独立 token。
+        print("[zhcrypt] 警告: 未配置服务器 token, 正在使用分发包内置的共享 token;\n"
+              "[zhcrypt] 所有持相同安装包的人将共享同一身份。请尽快执行:\n"
+              "[zhcrypt]   zhcrypt set-server <url> --token <你的独立token>",
+              file=sys.stderr)
+    return token
 
 
 def set_cert_pin(pin: str):

@@ -713,6 +713,18 @@ def x25519_ecdh(private_key_pem: bytes, public_key_pem: bytes) -> bytes:
     return shared
 
 
+def _x25519_exchange_checked(private_key, public_key) -> bytes:
+    """对象级 X25519 ECDH, 拒绝全零共享秘密 (低阶点公钥)。
+
+    供内部已持有密钥对象的路径 (如 decrypt_pfs) 复用, 与 x25519_ecdh 的
+    PEM 级防护保持同一策略 (审计 M7 补齐, R2)。
+    """
+    shared = private_key.exchange(public_key)
+    if not shared or shared == b"\x00" * 32:
+        raise ValueError("X25519 共享秘密为全零 (低阶点/恶意公钥)")
+    return shared
+
+
 def x3dh_shared_secret(
     sender_eph_priv_pem: bytes,
     sender_longterm_priv_pem: bytes,
@@ -886,7 +898,13 @@ def decrypt_hybrid_signed(
             raise DecryptionError("解密失败: 明文结构损坏")
         return {"plaintext": plaintext, "sender": sender, "verified": False, "timestamp": ts}
 
+    # R2 加固: Ed25519 签名恒 64 字节, 尾部布局固定为 sig_len(2)|sig(64)。
+    # 恶意 sig_len 会使切片错位 (把密文尾部拼进明文且绕过校验语义), 直接拒绝。
+    if len(inner) < offset + 66:
+        raise DecryptionError("解密失败: 明文结构损坏")
     sig_len = struct.unpack(">H", inner[-66:-64])[0]
+    if sig_len != 64:
+        raise DecryptionError("解密失败: 签名字段长度非法")
     sig = inner[-sig_len:]
     plaintext_bytes = inner[offset:-sig_len - 2]
     try:
@@ -1024,8 +1042,8 @@ def decrypt_pfs(
         receiver_signed_prekey_priv_pem
     )
 
-    dh1 = receiver_signed_prekey_priv.exchange(sender_eph_pub)
-    dh2 = receiver_identity_priv.exchange(sender_id_pub)
+    dh1 = _x25519_exchange_checked(receiver_signed_prekey_priv, sender_eph_pub)
+    dh2 = _x25519_exchange_checked(receiver_identity_priv, sender_id_pub)
 
     master = HKDF(
         algorithm=hashes.SHA256(), length=KEY_SIZE,
@@ -1056,7 +1074,12 @@ def decrypt_pfs(
             raise DecryptionError("解密失败: 明文结构损坏")
         return {"plaintext": plaintext, "sender": sender, "verified": False, "timestamp": ts}
 
+    # R2 加固: 同 hybrid_signed —— 签名长度必须恰为 64 字节, 否则拒绝
+    if len(inner) < off + 66:
+        raise DecryptionError("解密失败: 明文结构损坏")
     sig_len = struct.unpack(">H", inner[-66:-64])[0]
+    if sig_len != 64:
+        raise DecryptionError("解密失败: 签名字段长度非法")
     sig = inner[-sig_len:]
     plaintext_bytes = inner[off:-sig_len - 2]
     try:

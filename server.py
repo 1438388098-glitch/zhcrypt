@@ -522,17 +522,25 @@ MESSAGE_RETENTION_DAYS = 30
 
 _message_rate_buckets = {}
 
+# R2 加固: 是否信任反代头 X-Real-IP。默认 1 保持既有 Nginx 反代部署行为;
+# 5000 端口直连暴露的部署必须设 ZHPREKEY_TRUST_PROXY=0, 否则客户端可
+# 伪造 X-Real-IP 绕过限流 (该头本质是客户端可控输入)。
+_TRUST_PROXY = os.environ.get("ZHPREKEY_TRUST_PROXY", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
 
 def _client_ip():
     """取真实客户端 IP (兼容 Nginx 反代)。
 
-    优先 X-Real-IP (由 Nginx `proxy_set_header X-Real-IP $remote_addr` 覆盖写入,
-    客户端无法伪造); 不回退到 X-Forwarded-For —— 其首段客户端可控, 会被伪造
-    绕过限流 (审计 HIGH-3)。无 X-Real-IP 时以 remote_addr 兜底。
+    仅当 _TRUST_PROXY (ZHPREKEY_TRUST_PROXY!=0) 时信任 X-Real-IP —— 该头由
+    Nginx `proxy_set_header X-Real-IP $remote_addr` 覆盖写入, 反代之下客户端
+    无法伪造; 不回退到 X-Forwarded-For —— 其首段客户端可控, 会被伪造绕过
+    限流 (审计 HIGH-3)。其余情况一律以 remote_addr 计数。
     """
-    xri = request.headers.get("X-Real-IP", "")
-    if xri:
-        return xri.strip()
+    if _TRUST_PROXY:
+        xri = request.headers.get("X-Real-IP", "")
+        if xri:
+            return xri.strip()
     return request.remote_addr or "unknown"
 
 
@@ -965,14 +973,36 @@ def admin_cleanup_expired():
     return jsonify({"deleted": deleted, "prekey_expire_days": PREKEY_EXPIRE_DAYS})
 
 
+def _resolve_ssl_context():
+    """读取 ZHPREKEY_TLS_CERT/ZHPREKEY_TLS_KEY, 两个文件都存在时返回
+    (cert, key) 供 app.run(ssl_context=...) 使用, 否则返回 None (明文 HTTP)。
+    R2: 兑现 docs/zhcrypt_nginx_tls.md「方案二: 原生 TLS」的文档承诺。"""
+    cert = os.environ.get("ZHPREKEY_TLS_CERT", "")
+    key = os.environ.get("ZHPREKEY_TLS_KEY", "")
+    if cert and key and os.path.isfile(cert) and os.path.isfile(key):
+        return (cert, key)
+    return None
+
+
 if __name__ == "__main__":
     init_db()
     log.info(f"zhcrypt Prekey Server starting...")
     log.info(f"  DB: {DB_PATH}")
     log.info("  Auth Token: *** (已隐藏)")
     log.info(f"  Prekey Expire: {PREKEY_EXPIRE_DAYS} days")
+    # R2: 原生 TLS (兑现 docs/zhcrypt_nginx_tls.md「方案二」承诺)。
+    # 同时提供 ZHPREKEY_TLS_CERT/ZHPREKEY_TLS_KEY 环境变量即可启用,
+    # 无需 Nginx; 仅建议小规模/内网部署, 生产仍推荐反代终止 TLS。
+    _ssl_context = _resolve_ssl_context()
+    if _ssl_context:
+        log.info(f"  TLS: enabled (cert={_ssl_context[0]})")
+    else:
+        if os.environ.get("ZHPREKEY_TLS_CERT") or os.environ.get("ZHPREKEY_TLS_KEY"):
+            log.warning("  TLS: ZHPREKEY_TLS_CERT/KEY 指向的文件不存在, 以明文 HTTP 启动!")
+        else:
+            log.info("  TLS: disabled (明文 HTTP; 设 ZHPREKEY_TLS_CERT/KEY 启用)")
     log.info(f"  Listening on 0.0.0.0:5000")
-    log.info(f"  (建议通过宝塔 Nginx 反代)")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    log.info(f"  (建议通过宝塔 Nginx 反代, 或直连时设 ZHPREKEY_TRUST_PROXY=0)")
+    app.run(host="0.0.0.0", port=5000, debug=False, ssl_context=_ssl_context)
 else:
     init_db()

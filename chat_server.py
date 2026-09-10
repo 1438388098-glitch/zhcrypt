@@ -303,6 +303,14 @@ async def handler(websocket, path=None):
             msg_type = data.get("type", "")
 
             if msg_type == "auth":
+                # R2 加固: 一条连接只允许认证一次。认证后重放 auth 换绑
+                # identity 会在 connected_clients 残留指向同一 socket 的旧条目,
+                # 构成会话劫持/消息串号面。
+                if identity is not None:
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 409, "message": "already authenticated"}))
+                    await websocket.close()
+                    return
                 token = data.get("token", "")
                 ident = data.get("identity", "")
                 if not hmac.compare_digest(token, AUTH_TOKEN):
@@ -391,10 +399,23 @@ async def handler(websocket, path=None):
                     await websocket.send(json.dumps(
                         {"type": "error", "code": 413, "message": "file too large"}))
                     continue
+                # R2 加固: 解码后再校验一次实际大小。WS 路径无分块, 单条消息
+                # 即整个文件, base64 上限 + 解码上限共同构成 ~37.5MB 硬上限
+                # (与 REST 分块路径的 MAX_FILE_SIZE=2GB 分级一致)。
+                try:
+                    file_blob = base64.b64decode(file_data_b64)
+                except Exception:
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 400, "message": "invalid base64"}))
+                    continue
+                if len(file_blob) > 37 * 1024 * 1024:
+                    await websocket.send(json.dumps(
+                        {"type": "error", "code": 413, "message": "file too large"}))
+                    continue
                 token = secrets.token_hex(16)
                 file_path = os.path.join(FILE_DIR, token)
                 with open(file_path, "wb") as f:
-                    f.write(base64.b64decode(file_data_b64))
+                    f.write(file_blob)
                 # V5/#7: 记录上传者身份与预期接收方 (接收方由客户端在发送文件时提供)
                 db = _connect()
                 record_file_upload(db, token, identity, data.get("recipient", ""))
