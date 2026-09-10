@@ -653,6 +653,13 @@ def cmd_restore(args):
             _err(str(e))
     if len(collected) < 3:
         _err(f"需要 3 个份额, 只提供了 {len(collected)} 个")
+    key_path = os.path.join(store.key_dir, f"{identity}.key")
+    # R11: 覆盖现有私钥前必须确认 (-y 供脚本跳过)
+    if os.path.exists(key_path) and not getattr(args, "yes", False):
+        answer = input(f"  身份 '{identity}' 已有私钥, 覆盖? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            _err("已取消")
+            return
     try:
         encrypt_key = recover_secret(collected, threshold=3)
         with open(backup_path, "rb") as f:
@@ -663,7 +670,7 @@ def cmd_restore(args):
         encrypted_pem = data[17:]
         aesgcm = AESGCM(encrypt_key)
         key_pem = aesgcm.decrypt(nonce, encrypted_pem, None)
-        key_path = os.path.join(store.key_dir, f"{identity}.key")
+        os.makedirs(store.key_dir, exist_ok=True)  # R12: 延迟建目录后恢复路径需自建
         # R11 P0 修复(续): 恢复出的 PEM 必须重新以用户口令 Argon2id 包裹
         # 落盘 —— 原实现把裸 PEM 直接写进 .key, 与 _unwrap_key 的包裹格式
         # 不符, 恢复后一切解密仍 InvalidTag (备份功能整体不可用的第二层)。
@@ -1297,6 +1304,8 @@ def build_parser():
 
     p_restore = sub.add_parser("restore")
     p_restore.add_argument("identity", nargs="?", default="default")
+    p_restore.add_argument("-y", "--yes", action="store_true",
+                           help="覆盖现有私钥时跳过确认 (供脚本使用)")
 
     p_strength = sub.add_parser("strength")
     p_strength.add_argument("password", nargs="?", default=None,
