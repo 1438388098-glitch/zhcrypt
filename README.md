@@ -52,8 +52,10 @@ zhcrypt chat-poll
 
 ### 已知待办 (需协议版本升级, 列入下个大版本)
 
-Double Ratchet 实际轮转 (post-compromise 自愈)、密文头 Argon2id 参数纳入 GCM AAD、
-HKDF salt 随机化、Shamir 标准安全质数。
+Double Ratchet post-compromise 自愈仅部分落地 (跨链乱序预存已实现,
+完整重启动同步未做); 密文头 Argon2id 参数未纳入 GCM AAD (流式头靠
+钳制兜底); HKDF 固定 salt; Shamir 标准安全质数; X3DH 显式 AD 绑定。
+详见 `docs/autopilot_report.md` 遗留清单与 `RELEASE_NOTES_3.2.0.md`。
 
 ### 部署安全必做
 

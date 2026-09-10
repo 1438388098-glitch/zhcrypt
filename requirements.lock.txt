@@ -23,3 +23,5 @@ pytest==9.1.1
 pywin32-ctypes==0.2.3
 setuptools==83.0.0
 websocket-client==1.9.0
+# R15 补齐: R13 构建实证根 lock 缺 textual (shell/TUI 必需), 与 client.lock 对齐
+textual==8.2.8

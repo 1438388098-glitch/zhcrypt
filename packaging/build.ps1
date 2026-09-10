@@ -26,8 +26,13 @@ if ($LASTEXITCODE -ne 0) { throw "GUI build failed" }
 if ($LASTEXITCODE -ne 0) { throw "CLI build failed" }
 
 # 4. merge into single runtime (GUI base + CLI extras)
-Remove-Item -Recurse -Force $Final -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $Final | Out-Null
+# R15: OneDrive/同步盘下目录句柄可能短暂占用, Remove 后仍存在时重试再建
+foreach ($i in 1..5) {
+    if (-not (Test-Path $Final)) { break }
+    Remove-Item -Recurse -Force $Final -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds (300 * $i)
+}
+New-Item -ItemType Directory -Path $Final -Force | Out-Null
 
 $GuiDist = Join-Path $Dist "zhcrypt_gui"
 $CliDist = Join-Path $Dist "zhcrypt_cli"
