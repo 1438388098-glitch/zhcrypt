@@ -36,6 +36,8 @@ log = logging.getLogger("zhcrypt")
 
 from schema import (
     PREKEYS_TABLE_SQL,
+    PREKEYS_UNIQ_DEDUPE_SQL,
+    PREKEYS_UNIQ_INDEX_SQL,
     IDENTITIES_TABLE_SQL,
     MESSAGES_TABLE_SQL,
     MESSAGES_IDX_RECIPIENT_SQL,
@@ -106,11 +108,14 @@ _TOKEN_HEX_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 _upload_sessions = {}
 # 每 token 互斥锁 (进程内, 防分块竞态双写, C3 修复)
 _upload_locks = {}
+# R4 修复: 守护锁必须是模块级单例 —— 原实现 `with threading.Lock()` 每次调用
+# 都新建匿名锁立即获取, 恒不阻塞, check-then-insert 的竞态防护形同虚设。
+_UPLOAD_LOCKS_GUARD = threading.Lock()
 
 
 def _token_lock(upload_token):
     """获取 token 对应的互斥锁 (进程内)。"""
-    with threading.Lock():
+    with _UPLOAD_LOCKS_GUARD:
         if upload_token not in _upload_locks:
             _upload_locks[upload_token] = threading.Lock()
         return _upload_locks[upload_token]
@@ -213,6 +218,9 @@ def init_db():
     db.execute(MESSAGES_IDX_SESSION_SQL)
     db.execute(MESSAGES_IDX_SERVER_TS_SQL)
     db.execute(FILES_TABLE_SQL)
+    # R4: OTP 去重迁移 + 唯一索引 (防同一 one-time prekey 被消耗两次)
+    db.execute(PREKEYS_UNIQ_DEDUPE_SQL)
+    db.execute(PREKEYS_UNIQ_INDEX_SQL)
     db.commit()
     db.close()
 
@@ -320,14 +328,17 @@ def upload_prekey(identity):
 
     # 安全修复 (test_security_fixes #6): 服务端绝不存储任何私钥材料。
     # 即使客户端误传 signed_prekey_priv, 也直接忽略, 不落库。
+    # R4: INSERT OR IGNORE + 唯一索引 —— 重复上传/重试不再产生重复 OTP 行,
+    # 计数以实际落库为准 (total_changes 增量)。
     one_time_count = 0
     if "one_time_prekeys" in data and isinstance(data["one_time_prekeys"], list):
+        before = db.total_changes
         for otpk in data["one_time_prekeys"]:
             db.execute("""
-                INSERT INTO prekeys (identity, key_type, prekey_data, fingerprint, created_at)
+                INSERT OR IGNORE INTO prekeys (identity, key_type, prekey_data, fingerprint, created_at)
                 VALUES (?, 'one_time', ?, ?, ?)
             """, (identity, otpk, data["fingerprint"], _now()))
-            one_time_count += 1
+        one_time_count = db.total_changes - before
 
     db.commit()
 
@@ -448,13 +459,14 @@ def upload_batch(identity):
         return jsonify({"error": f"too many one_time_prekeys (max {MAX_ONE_TIME_PREKEYS})"}), 400
 
     db = get_db()
-    count = 0
+    # R4: INSERT OR IGNORE —— 重复 OTP 静默去重, stored 计实际落库数
+    before = db.total_changes
     for otpk in otpks:
         db.execute("""
-            INSERT INTO prekeys (identity, key_type, prekey_data, fingerprint, created_at)
+            INSERT OR IGNORE INTO prekeys (identity, key_type, prekey_data, fingerprint, created_at)
             VALUES (?, 'one_time', ?, ?, ?)
         """, (identity, otpk, data.get("fingerprint", ""), _now()))
-        count += 1
+    count = db.total_changes - before
 
     db.execute("""
         UPDATE identities SET last_seen = ?
@@ -585,7 +597,8 @@ def _check_prekey_rate_limit(identity):
 @require_auth
 def message_send():
     data = request.get_json(force=True)
-    if not data or not data.get("id") or not data.get("to"):
+    # R4: JSON 顶层必须是对象 —— 数组/字符串会令 .get 抛 AttributeError → 500
+    if not isinstance(data, dict) or not data.get("id") or not data.get("to"):
         return jsonify({"error": "missing id or recipient"}), 400
 
     # 安全修复 (test_security_fixes #1-REST): 强制发送者身份字段,
@@ -627,7 +640,11 @@ def message_send():
 @require_auth
 def message_pending():
     identity = request.args.get("identity", "")
-    limit = min(int(request.args.get("limit", "50")), 100)
+    try:
+        # R4: 非数字 limit 此前抛 ValueError → HTML 500, 现转 400
+        limit = min(int(request.args.get("limit", "50")), 100)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid limit"}), 400
     if not identity:
         return jsonify({"error": "identity required"}), 400
 
@@ -666,6 +683,9 @@ def message_pending():
 @require_auth
 def message_ack():
     data = request.get_json(force=True)
+    # R4: 顶层类型校验 (数组/字符串 body 此前会 AttributeError → 500)
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid body"}), 400
     msg_ids = data.get("msg_ids", [])
     if not isinstance(msg_ids, list) or not msg_ids:
         return jsonify({"error": "msg_ids required"}), 400
@@ -689,7 +709,10 @@ def message_history():
     identity = request.args.get("identity", "")
     peer = request.args.get("with", "")
     before_id = request.args.get("before", None)
-    limit = min(int(request.args.get("limit", "50")), 200)
+    try:
+        limit = min(int(request.args.get("limit", "50")), 200)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid limit"}), 400
 
     if not identity or not peer:
         return jsonify({"error": "identity and with required"}), 400
@@ -726,7 +749,12 @@ def message_history():
 @app.route("/v1/messages/prune", methods=["DELETE"])
 @require_auth
 def message_prune():
-    days = int(request.args.get("older_than_days", str(MESSAGE_RETENTION_DAYS)))
+    try:
+        days = int(request.args.get("older_than_days", str(MESSAGE_RETENTION_DAYS)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid older_than_days"}), 400
+    if days < 0:
+        return jsonify({"error": "invalid older_than_days"}), 400
     cutoff = _now() - days * 86400
     db = get_db()
     deleted = db.execute(

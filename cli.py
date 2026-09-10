@@ -553,8 +553,15 @@ def cmd_decrypt_signed(args):
 def cmd_backup(args):
     from secretsharing import split_secret, format_share
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from keys import _validate_identity
     store = KeyStore()
     identity = args.identity or "default"
+    # R4 修复: 身份名拼进备份文件路径, 必须过白名单 (此前 "../x" 可写 key_dir 外)
+    try:
+        _validate_identity(identity)
+    except ValueError as e:
+        _err(str(e))
+        return
     pwd = _prompt_passphrase(f"私钥密码 '{identity}': ", confirm=False)
     try:
         key_pem = store.load_private_key_pem(identity, pwd)
@@ -586,8 +593,15 @@ def cmd_backup(args):
 def cmd_restore(args):
     from secretsharing import recover_secret, parse_share
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from keys import _validate_identity
     store = KeyStore()
     identity = args.identity or "default"
+    # R4 修复: 同 cmd_backup —— 白名单校验防路径穿越
+    try:
+        _validate_identity(identity)
+    except ValueError as e:
+        _err(str(e))
+        return
     backup_path = os.path.join(store.key_dir, f"{identity}.backup")
     if not os.path.exists(backup_path):
         _err(f"备份文件不存在: {backup_path}")
@@ -1102,7 +1116,14 @@ def main():
         cmd_shell()
         return
 
-    parser = argparse.ArgumentParser(prog="zhcrypt", add_help=False)
+    parser = argparse.ArgumentParser(
+        prog="zhcrypt",
+        description="zhcrypt - 中文端到端加密工具 (文件加密 / E2E 聊天 / Shamir 备份)",
+        # R4 修复: 恢复顶层 -h/--help (此前 add_help=False 使 zhcrypt --help
+        # 直接报错退出码 2, 新用户无入门路径)
+    )
+    parser.add_argument("-V", "--version", action="version",
+                        version=f"zhcrypt {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     p_init = sub.add_parser("init")
@@ -1241,7 +1262,11 @@ def main():
     }
     fn = dispatch.get(args.command)
     if fn:
-        fn(args)
+        rc = fn(args)
+        # R4 修复: 不再丢弃子命令退出码 —— 返回非零 int 的命令 (如 chat)
+        # 以该码退出, 脚本调用方才能感知失败
+        if isinstance(rc, int) and rc != 0:
+            sys.exit(rc)
 
 if __name__ == "__main__":
     main()

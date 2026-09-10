@@ -83,6 +83,20 @@ FILES_TABLE_SQL = """
     )
 """
 
+# R4: one-time prekey 唯一性 —— 重复上传/断点重试曾会产生重复行, 同一 OTP
+# 可被两次握手消耗 (X3DH 复用面)。迁移去重后建唯一索引。
+PREKEYS_UNIQ_DEDUPE_SQL = """
+    DELETE FROM prekeys WHERE rowid NOT IN (
+        SELECT MIN(rowid) FROM prekeys
+        GROUP BY identity, key_type, prekey_data
+    )
+"""
+
+PREKEYS_UNIQ_INDEX_SQL = """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_prekeys_uniq
+    ON prekeys(identity, key_type, prekey_data)
+"""
+
 
 def add_column(db, table, column, col_type):
     """为已存在的表补齐列 (幂等, 用于旧库迁移)"""

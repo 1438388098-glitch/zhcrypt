@@ -299,6 +299,12 @@ async def handler(websocket, path=None):
                 await websocket.send(json.dumps(
                     {"type": "error", "code": 400, "message": "invalid json"}))
                 continue
+            # R4: 顶层必须是对象 —— 数组/字符串帧此前会令 .get 抛异常
+            # 未捕获 → websockets 以 1011 断连而非回错误帧。
+            if not isinstance(data, dict):
+                await websocket.send(json.dumps(
+                    {"type": "error", "code": 400, "message": "invalid frame"}))
+                continue
 
             msg_type = data.get("type", "")
 
@@ -321,6 +327,8 @@ async def handler(websocket, path=None):
                 if not ident:
                     await websocket.send(json.dumps(
                         {"type": "error", "code": 400, "message": "missing identity"}))
+                    # R4: 与其他错误分支一致, 回错误帧后关闭连接
+                    await websocket.close()
                     return
                 # 服务端身份名校验 (审计 H4): 拒绝路径穿越/非法身份名。
                 if not valid_identity(ident):
