@@ -1,5 +1,11 @@
 # zhcrypt
 
+> **zhcrypt** is an end-to-end encrypted communication toolkit built for Chinese users.
+> It combines Argon2id key derivation, AES-256-GCM authenticated encryption, RSA-4096-OAEP
+> hybrid encryption, and X3DH + Double Ratchet forward secrecy, with TOFU safety codes
+> for out-of-band MITM verification. Ships as a CLI (`zhcrypt`), a GUI (`zhcrypt-gui`),
+> and a self-hosted Flask/WebSocket server. See `manual.md` and `docs/` for full usage.
+
 端到端加密中文通信系统。Argon2id 密钥派生 + AES-256-GCM 认证加密 + RSA-4096-OAEP-SHA512
 混合加密 + X3DH/Double Ratchet 前向安全 + TOFU 安全识别码。
 

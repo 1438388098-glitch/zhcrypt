@@ -35,7 +35,7 @@ _signing_map.tsv
 _*.py
 
 # 编码乱码残留文件
-绯荤粲
+绯荤粺
 
 # R16: 构建与运行时遗漏项
 packaging/Output/
