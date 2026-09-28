@@ -1,86 +1,76 @@
+English · [简体中文](./README.zh-CN.md)
+
 # zhcrypt
 
-> **zhcrypt** is an end-to-end encrypted communication toolkit built for Chinese users.
-> It combines Argon2id key derivation, AES-256-GCM authenticated encryption, RSA-4096-OAEP
-> hybrid encryption, and X3DH + Double Ratchet forward secrecy, with TOFU safety codes
-> for out-of-band MITM verification. Ships as a CLI (`zhcrypt`), a GUI (`zhcrypt-gui`),
-> and a self-hosted Flask/WebSocket server. See `manual.md` and `docs/` for full usage.
+**zhcrypt** is an end-to-end encrypted communication toolkit built for Chinese users. It combines Argon2id key derivation, AES-256-GCM authenticated encryption, RSA-4096-OAEP-SHA512 hybrid encryption, and X3DH + Double Ratchet forward secrecy, with TOFU safety codes for out-of-band MITM verification. It ships as a CLI (`zhcrypt`), a GUI (`zhcrypt-gui`), and a self-hosted Flask/WebSocket server. See `manual.md` and `docs/` for full usage.
 
-端到端加密中文通信系统。Argon2id 密钥派生 + AES-256-GCM 认证加密 + RSA-4096-OAEP-SHA512
-混合加密 + X3DH/Double Ratchet 前向安全 + TOFU 安全识别码。
+## Components
 
-## 组件
-
-| 组件 | 说明 |
+| Component | Description |
 |---|---|
-| `zhcrypt.exe` | 命令行工具 (控制台) |
-| `zhcrypt-gui.exe` | 图形界面 (tkinter) |
-| `server.py` / `chat_server.py` | 自托管服务器 (Flask + websockets) |
+| `zhcrypt.exe` | Command-line tool (console) |
+| `zhcrypt-gui.exe` | Graphical interface (tkinter) |
+| `server.py` / `chat_server.py` | Self-hosted server (Flask + websockets) |
 
-## 快速开始
+## Quick start
 
 ```bash
-# 创建身份 (GUI 内同样支持)
+# Create an identity (also supported inside the GUI)
 zhcrypt init alice
-# 加密 / 解密
+# Encrypt / decrypt
 zhcrypt encrypt "机密内容"
-zhcrypt decrypt <密文>
-# 聊天
+zhcrypt decrypt <ciphertext>
+# Chat
 zhcrypt chat-send -t bob "你好"
 zhcrypt chat-poll
 ```
 
-完整使用说明见 `manual.md` 与 `docs/` 目录 (含威胁模型、服务器部署、密钥备份恢复)。
+For full usage see `manual.md` and the `docs/` directory (threat model, server deployment, key backup & recovery).
 
-## 安全特性
+## Security features
 
-- **Argon2id** (RFC 9106 参数, 256MB 内存) — 抗 GPU/ASIC 暴力破解
-- **AES-256-GCM** — 认证加密, 防篡改与密文特征泄露
-- **RSA-4096 + OAEP(SHA-512)** — 混合加密
-- **X3DH + Double Ratchet** — 前向安全 (会话密钥按消息推进)
-- **TOFU 安全识别码** — 带外比对, 防中间人; 签名公钥突变即拒绝会话
-- **证书固定 (SPKI pinning)** — 可选, 防 rogue CA
+- **Argon2id** (RFC 9106 parameters, 256MB memory) — resists GPU/ASIC brute force
+- **AES-256-GCM** — authenticated encryption, prevents tampering and ciphertext-pattern leakage
+- **RSA-4096 + OAEP(SHA-512)** — hybrid encryption
+- **X3DH + Double Ratchet** — forward secrecy (session keys advance per message)
+- **TOFU safety codes** — out-of-band comparison, MITM prevention; any unexpected change in the signed public key rejects the session
+- **Certificate pinning (SPKI pinning)** — optional, guards against rogue CAs
 
-## 安全加固 (2026-08-13 授权审计)
+## Security hardening (authorized audit, 2026-08-13)
 
-本轮授权安全审计修复了以下问题, 已回归测试通过 (`test_all` 38/38、`test_security_fixes` 66/66、
-`test_x3dh_full` 25/25、`test_chat` 18/18、单元测试 161 passed):
+This authorized security-audit round fixed the following issues, all regression-tested (`test_all` 38/38, `test_security_fixes` 66/66, `test_x3dh_full` 25/25, `test_chat` 18/18, 161 unit tests passed):
 
-- **AEAD nonce 复用**: one-time prekey 批量包裹改用每份独立 nonce (原同 key+nonce 复用触发 GCM keystream 复用)。
-- **prekey 身份所有权**: 服务端拒绝静默覆盖他人身份的签名公钥 (防预密钥投毒 / 冒充)。
-- **路径穿越**: 流式文件解密输出名强制 basename 净化; 服务端/客户端全链路身份名白名单校验。
-- **Argon2id 内存 DoS**: 增加 `memory×parallelism` 乘积钳制 (≤2GiB)。
-- **限流绕过**: 消息限流键改用 `X-Real-IP` (不再信任可伪造的 `X-Forwarded-For`)。
-- **临时口令熵**: 临时口令词表从 20 词扩至 256 词 (≈48 bit, 原 17.3 bit)。
-- **Double Ratchet 消息号钳制**: 拒绝超大 `message_number` 跳变 (防 CPU DoS)。
-- **本地密钥保护**: 文件 AES 密钥以本机 `device.key` 加密落盘; 私钥文件收紧 0600。
-- **X25519 低阶点防护**: 拒绝全零共享秘密。
+- **AEAD nonce reuse**: one-time prekey batch wrapping now uses an independent nonce per item (the previous key+nonce reuse triggered GCM keystream reuse).
+- **Prekey identity ownership**: the server rejects silently overwriting another identity's signed public key (prevents prekey poisoning / impersonation).
+- **Path traversal**: streamed file decryption output names are forcibly basename-sanitized; identity names are whitelist-validated across the full server/client chain.
+- **Argon2id memory DoS**: added a `memory×parallelism` product clamp (≤2GiB).
+- **Rate-limit bypass**: the message rate-limit key now uses `X-Real-IP` (no longer trusts the spoofable `X-Forwarded-For`).
+- **Temporary passphrase entropy**: the temporary passphrase wordlist grew from 20 to 256 words (≈48 bit, previously 17.3 bit).
+- **Double Ratchet message-number clamping**: rejects huge `message_number` jumps (prevents CPU DoS).
+- **Local key protection**: file AES keys are encrypted at rest with the local `device.key`; private key files tightened to 0600.
+- **X25519 low-order point protection**: rejects all-zero shared secrets.
 
-### 已知待办 (需协议版本升级, 列入下个大版本)
+### Known outstanding items (require a protocol version bump, scheduled for the next major release)
 
-Double Ratchet post-compromise 自愈仅部分落地 (跨链乱序预存已实现,
-完整重启动同步未做); 密文头 Argon2id 参数未纳入 GCM AAD (流式头靠
-钳制兜底); HKDF 固定 salt; Shamir 标准安全质数; X3DH 显式 AD 绑定。
-详见 `docs/autopilot_report.md` 遗留清单与 `RELEASE_NOTES_3.2.0.md`。
+Double Ratchet post-compromise self-healing is only partially in place (cross-chain out-of-order prestorage is implemented, full restart resynchronization is not); ciphertext-header Argon2id parameters are not covered by the GCM AAD (streaming headers rely on the clamp as a fallback); fixed HKDF salt; Shamir standard safe primes; explicit X3DH AD binding. See the leftover list in `docs/autopilot_report.md` and `RELEASE_NOTES_3.2.0.md`.
 
-### 部署安全必做
+### Deployment security essentials
 
-- 生产环境必须启用 HTTPS/WSS + 证书固定:
-  `zhcrypt set-server https://你的域名 --token <tok> --pin <指纹>`
-- 服务器认证令牌仅经环境变量 `ZHPREKEY_TOKEN` 注入, 严禁提交到版本库。
-- 5000 端口直连暴露 (无 Nginx) 时必须设 `ZHPREKEY_TRUST_PROXY=0`,
-  否则客户端可伪造 `X-Real-IP` 绕过消息限流 (默认 1 为反代部署保持兼容)。
-- 小规模/内网可启用原生 TLS (无需 Nginx, 见 `docs/zhcrypt_nginx_tls.md` 方案二):
+- Production environments must enable HTTPS/WSS + certificate pinning:
+  `zhcrypt set-server https://your-domain --token <tok> --pin <fingerprint>`
+- The server auth token is injected only via the `ZHPREKEY_TOKEN` environment variable; committing it to version control is strictly forbidden.
+- With port 5000 exposed directly (no Nginx), `ZHPREKEY_TRUST_PROXY=0` is mandatory, otherwise clients can spoof `X-Real-IP` to bypass message rate limiting (default 1 keeps reverse-proxy deployments compatible).
+- Small-scale / LAN deployments may enable native TLS (no Nginx needed, see option 2 in `docs/zhcrypt_nginx_tls.md`):
   `ZHPREKEY_TLS_CERT=/path/cert.pem ZHPREKEY_TLS_KEY=/path/key.pem python server.py`
 
-### 脚本化使用示例
+### Scripted usage example
 
 ```bash
-# 密码不进 shell 历史: 管道输入检测强度
+# Keep the password out of shell history: pipe it into the strength check
 echo "你的密码" | zhcrypt strength --stdin
 ```
 
-## 构建
+## Building
 
 ```bash
 py -3.13 -m venv packaging\buildenv
@@ -88,14 +78,13 @@ packaging\buildenv\Scripts\pip install -r requirements.lock.txt
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
 
-产物: `packaging\dist\zhcrypt\` (含 SHA256SUMS.txt)。
-依赖锁定: `requirements.lock.txt`; 软件物料清单: `SBOM.json`; 构建信息: `buildinfo.json`。
+Artifacts: `packaging\dist\zhcrypt\` (includes SHA256SUMS.txt).
+Dependency lock: `requirements.lock.txt`; SBOM: `SBOM.json`; build info: `buildinfo.json`.
 
-## 服务器部署
+## Server deployment
 
-见 `docs/DEPLOY.md`。服务器认证令牌经环境变量 `ZHPREKEY_TOKEN` 注入,
-客户端通过 `zhcrypt set-server <url> --token <token>` 配置。
+See `docs/DEPLOY.md`. The server auth token is injected via the `ZHPREKEY_TOKEN` environment variable; clients configure it with `zhcrypt set-server <url> --token <token>`.
 
-## 许可
+## License
 
-MIT (见 LICENSE)。第三方组件许可见 THIRD_PARTY_NOTICES.txt。
+MIT (see LICENSE). Third-party component licenses in THIRD_PARTY_NOTICES.txt.
