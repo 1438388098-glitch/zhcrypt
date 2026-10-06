@@ -7,6 +7,11 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    # 兜底: 测试套件打印中文, 强制 UTF-8 输出 (脚本内部亦自行 reconfigure,
+    # 不依赖控制台代码页, 此处保证 pytest 步骤同样不受 cp1252 影响)。
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,7 +29,7 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
-    continue-on-error: true   # 已知 CVE 门禁先观察, 稳定后改为阻断
+    # CVE 门禁必须阻断: 本仓库核心即密码学, 依赖漏洞不可放过。
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
