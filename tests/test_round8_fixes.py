@@ -41,19 +41,43 @@ def _mkstate(**kw):
 # ----------------------------------------------------------------------
 
 def test_dh_step_preserves_old_chain_skipped():
-    from ratchet import receive_message, KDF_CK
+    from ratchet import receive_message, KDF_CK, KDF_RK, _header_aad
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.asymmetric import x25519
+    from cryptography.hazmat.primitives import serialization
+
     state = _mkstate(recv_msg_number=2)
     old_recv_ck = state.recv_chain_key
     old_pub = state.their_ratchet_pub
-    new_pub = os.urandom(32)
 
-    # 对端已发到 pn=4 (旧链号 2、3 在途), 随新链消息到达
+    # _mkstate 的公私钥是各自随机的, 做 ECDH 必须换成成对的密钥
+    from ratchet import generate_x25519_keypair_raw
+    own_priv, own_pub = generate_x25519_keypair_raw()
+    state.our_ratchet_priv = own_priv
+    state.our_ratchet_pub = own_pub
+
+    # 模拟对端: 用自己的新棘轮私钥与本端棘轮公钥做 ECDH, 得到同一个 CKr
+    new_priv = x25519.X25519PrivateKey.generate()
+    new_pub = new_priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    peer_pub = x25519.X25519PublicKey.from_public_bytes(state.our_ratchet_pub)
+    shared = new_priv.exchange(peer_pub)
+    _rk1, CKr = KDF_RK(state.root_key, shared)
+    _ck, mk = KDF_CK(CKr)
+
+    nonce = os.urandom(12)
+    inner = b"new-chain"
+    aad = _header_aad(state.session_id, new_pub, 0, 4)
+    ct = AESGCM(mk).encrypt(nonce, inner, aad)
+
+    # 对端已发到 pn=4 (旧链号 2、3 在途), 随新链首条消息到达
     msg = {"id": "m1",
-           "payload": {"ratchet_public_key": core.urlsafe_b64encode(new_pub).decode(),
+           "payload": {"v": 2,
+                       "ratchet_public_key": core.urlsafe_b64encode(new_pub).decode(),
                        "message_number": 0, "previous_chain_length": 4,
-                       "nonce": core.urlsafe_b64encode(os.urandom(12)).decode(),
-                       "ciphertext": core.urlsafe_b64encode(os.urandom(64)).decode()}}
-    receive_message(state, msg)   # 解密失败(假密文)但 step 已发生
+                       "nonce": core.urlsafe_b64encode(nonce).decode(),
+                       "ciphertext": core.urlsafe_b64encode(ct).decode()}}
+    assert receive_message(state, msg) == inner
 
     # 旧链号 2、3 的 MK 已被预存
     from ratchet import SessionState as _S
@@ -76,7 +100,8 @@ def test_dh_step_preserves_old_chain_skipped():
 # ----------------------------------------------------------------------
 
 def test_first_message_retry_after_failure():
-    from ratchet import (SessionState, complete_session_first_message, KDF_CK)
+    from ratchet import (SessionState, complete_session_first_message, KDF_CK,
+                         _header_aad)
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -92,8 +117,9 @@ def test_first_message_retry_after_failure():
 
     nonce = os.urandom(12)
     inner = b"hello first"
-    sid = state.session_id.encode() if isinstance(state.session_id, str) else state.session_id
-    ct_bad = AESGCM(mk).encrypt(os.urandom(12), inner, sid)  # 错误 nonce
+    # R17: 首条消息也绑定 v2 消息头
+    aad = _header_aad(state.session_id, sender_pub, 0, 0)
+    ct_bad = AESGCM(mk).encrypt(os.urandom(12), inner, aad)  # 错误 nonce
 
     r1 = complete_session_first_message(
         state, sender_pub,
@@ -101,7 +127,7 @@ def test_first_message_retry_after_failure():
         base64.urlsafe_b64encode(ct_bad).decode(), inner)
     assert r1 is None
     # 链未推进: 相同 MK 的正确密文仍可解 (重传场景)
-    ct_ok = AESGCM(mk).encrypt(nonce, inner, sid)
+    ct_ok = AESGCM(mk).encrypt(nonce, inner, aad)
     r2 = complete_session_first_message(
         state, sender_pub,
         base64.urlsafe_b64encode(nonce).decode(),
