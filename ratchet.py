@@ -13,6 +13,7 @@ KDF 定义:
 
 import os
 import sys
+import copy
 import json
 import time
 import struct
@@ -33,6 +34,12 @@ MAX_SKIPPED = 100
 MAX_SEEN_IDS = 1000
 SESSION_EXPIRE_DAYS = 30
 
+# R17: 消息格式版本。v2 起把"消息头"整体纳入 AEAD 关联数据 (AAD),
+# 使 ratchet_public_key / message_number / previous_chain_length 无法被
+# 中继篡改。v1 消息头无认证, 默认拒收 (可用环境变量临时放行以便过渡)。
+MESSAGE_VERSION = 2
+ALLOW_LEGACY_AAD_ENV = "ZHCHAT_ALLOW_LEGACY_AAD"
+
 
 def _b64(data):
     return urlsafe_b64encode(data).decode("ascii")
@@ -40,6 +47,42 @@ def _b64(data):
 
 def _b64d(s):
     return urlsafe_b64decode(s.encode("ascii"))
+
+
+def _session_id_bytes(session_id):
+    """会话 ID 的规范化字节形式。
+
+    session_id 在内存里可能是 16 字节原始值, 落盘再读回后是 32 字符 hex 串
+    (见 to_dict/from_dict)。AEAD 的 AAD 必须两端一致, 因此统一归一化为
+    原始字节, 避免"发消息时是 bytes、重载后变 hex 串"导致认证标签对不上。
+    """
+    if isinstance(session_id, bytes):
+        return session_id
+    s = str(session_id)
+    if len(s) == 32:
+        try:
+            return bytes.fromhex(s)
+        except ValueError:
+            pass
+    return s.encode("utf-8")
+
+
+def _header_aad(session_id, ratchet_pub, msg_num, pn):
+    """v2 消息头的规范化编码, 用作 AEAD 关联数据。
+
+    字段顺序与长度前缀固定, 防止拼接歧义; msg_num/pn 用定长大端整数。
+    任何一项被改动都会让解密失败, 而不是让状态被静默破坏。
+    """
+    sid = _session_id_bytes(session_id)
+    num = int(msg_num) & 0xFFFFFFFFFFFFFFFF
+    prev = int(pn) & 0xFFFFFFFFFFFFFFFF
+    return (
+        b"zhchat-hdr-v2"
+        + struct.pack(">I", len(sid))
+        + sid
+        + struct.pack(">QQ", num, prev)
+        + bytes(ratchet_pub)
+    )
 
 
 def KDF_CK(chain_key):
@@ -266,13 +309,17 @@ def send_message(state, inner_bytes):
     CKs, MK = KDF_CK(state.send_chain_key)
     state.send_chain_key = CKs
 
-    nonce = secrets.token_bytes(NONCE_SIZE)
-    aesgcm = AESGCM(MK)
-    ciphertext = aesgcm.encrypt(nonce, inner_bytes, state.session_id.encode() if isinstance(state.session_id, str) else state.session_id)
-
-    msg_id = secrets.token_hex(16)
     msg_num = state.send_msg_number
     pn = state.prev_send_chain_len
+
+    nonce = secrets.token_bytes(NONCE_SIZE)
+    aesgcm = AESGCM(MK)
+    # R17: 消息头纳入 AAD。接收方用完全相同的规范化编码重建, 任何篡改都会
+    # 在解密阶段被认证标签拦下。
+    aad = _header_aad(state.session_id, state.our_ratchet_pub, msg_num, pn)
+    ciphertext = aesgcm.encrypt(nonce, inner_bytes, aad)
+
+    msg_id = secrets.token_hex(16)
 
     state.send_msg_number += 1
     state.touch()
@@ -285,6 +332,7 @@ def send_message(state, inner_bytes):
         "timestamp": time.time(),
         "type": "message",
         "payload": {
+            "v": MESSAGE_VERSION,
             "ratchet_public_key": _b64(state.our_ratchet_pub),
             "message_number": msg_num,
             "previous_chain_length": pn,
@@ -295,13 +343,41 @@ def send_message(state, inner_bytes):
 
 
 def receive_message(state, msg):
-    if state._has_seen(msg["id"]):
-        return None
-    state._mark_seen(msg["id"])
+    """接收一条消息 (R17 事务化)。
 
-    payload = msg["payload"]
-    their_ratchet_pub = _b64d(payload["ratchet_public_key"])
-    msg_num = payload["message_number"]
+    此前实现一边解析消息头一边直接推进 recv_chain_key / recv_msg_number,
+    并在收到新 ratchet 公钥时无条件执行 DH 步。消息头没有认证, 于是中继只需
+    改一个字节就能把会话永久推离轨道 (后续合法消息也解不开)。现在整个过程在
+    状态副本上进行, 只有"认证通过并拿到明文"才提交回原状态。
+    """
+    trial = copy.deepcopy(state)
+    plain = _receive_message_inplace(trial, msg)
+    if plain is None:
+        return None
+    trial.touch()
+    state.__dict__.update(trial.__dict__)
+    return plain
+
+
+def _receive_message_inplace(state, msg):
+    """在给定状态上完成一次接收; 失败时不保证状态干净, 调用方负责丢弃。"""
+    if not isinstance(msg, dict):
+        return None
+    msg_id = msg.get("id")
+    if not isinstance(msg_id, str) or not msg_id:
+        return None
+    if state._has_seen(msg_id):
+        return None
+
+    payload = msg.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        their_ratchet_pub = _b64d(payload["ratchet_public_key"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(their_ratchet_pub, bytes) or len(their_ratchet_pub) != 32:
+        return None
 
     # Skip DH ratchet for first reply (their_ratchet_pub still unset)
     if their_ratchet_pub != state.their_ratchet_pub and state.their_ratchet_pub != b"\x00" * 32:
@@ -316,9 +392,18 @@ def receive_message(state, msg):
                 for n in range(state.recv_msg_number, pn):
                     ck, mk = KDF_CK(ck)
                     state._add_skipped(state.their_ratchet_pub, n, mk)
-        _dh_ratchet_step(state, their_ratchet_pub)
+        try:
+            _dh_ratchet_step(state, their_ratchet_pub)
+        except Exception:
+            # 低阶点/非法公钥: 认证是不可能通过的, 直接放弃
+            return None
 
-    return _decrypt_message_in_chain(state, payload, msg)
+    plain = _decrypt_message_in_chain(state, payload, msg)
+    if plain is None:
+        return None
+    # 只有成功解出明文才记为已见; 否则被篡改的消息会顶掉合法消息的 msg_id。
+    state._mark_seen(msg_id)
+    return plain
 
 
 def _dh_ratchet_step(state, new_their_ratchet_pub):
@@ -341,13 +426,44 @@ def _dh_ratchet_step(state, new_their_ratchet_pub):
     state._prune_skipped()
 
 
+def _message_aad(state, payload):
+    """按消息格式版本选择 AAD; 返回 None 表示该消息不可被认证, 直接丢弃。"""
+    version = payload.get("v", 1)
+    if not isinstance(version, int) or isinstance(version, bool):
+        return None
+    if version >= MESSAGE_VERSION:
+        try:
+            pub = _b64d(payload["ratchet_public_key"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        msg_num = payload.get("message_number")
+        pn = payload.get("previous_chain_length", 0)
+        if not isinstance(msg_num, int) or isinstance(msg_num, bool) or msg_num < 0:
+            return None
+        if not isinstance(pn, int) or isinstance(pn, bool) or pn < 0:
+            return None
+        if not isinstance(pub, bytes) or len(pub) != 32:
+            return None
+        return _header_aad(state.session_id, pub, msg_num, pn)
+    # v1 头未认证: 仅在做协议迁移时可临时放行
+    if os.environ.get(ALLOW_LEGACY_AAD_ENV) == "1":
+        return _session_id_bytes(state.session_id)
+    return None
+
+
 def _decrypt_message_in_chain(state, payload, msg):
     msg_num = payload["message_number"]
     nonce = _b64d(payload["nonce"])
     ciphertext = _b64d(payload["ciphertext"])
-    sid = state.session_id
-    if isinstance(sid, str):
-        sid = sid.encode()
+
+    if not isinstance(nonce, bytes) or len(nonce) != NONCE_SIZE:
+        return None
+    if not isinstance(ciphertext, bytes) or len(ciphertext) < TAG_SIZE:
+        return None
+
+    aad = _message_aad(state, payload)
+    if aad is None:
+        return None
 
     # 消息号合法性 + 跳变钳制 (审计 M1): message_number 由对端控制,
     # 非整数或超大跳变会触发数十亿次 HKDF 派生 (CPU DoS) 且使链永久失步。
@@ -361,7 +477,7 @@ def _decrypt_message_in_chain(state, payload, msg):
         if mk is not None:
             try:
                 aesgcm = AESGCM(mk)
-                plain = aesgcm.decrypt(nonce, ciphertext, sid)
+                plain = aesgcm.decrypt(nonce, ciphertext, aad)
                 state.touch()
                 return plain
             except Exception:
@@ -380,7 +496,7 @@ def _decrypt_message_in_chain(state, payload, msg):
 
     try:
         aesgcm = AESGCM(MK)
-        plain = aesgcm.decrypt(nonce, ciphertext, sid)
+        plain = aesgcm.decrypt(nonce, ciphertext, aad)
         state.touch()
         return plain
     except Exception:
@@ -529,7 +645,8 @@ def x3dh_complete_session(
     return state
 
 
-def complete_session_first_message(state, sender_ratchet_pub_raw, nonce_b64, ciphertext_b64, inner_bytes):
+def complete_session_first_message(state, sender_ratchet_pub_raw, nonce_b64, ciphertext_b64,
+                                   inner_bytes, msg_num=0, pn=0):
     state.their_ratchet_pub = sender_ratchet_pub_raw
 
     our_ratchet_priv, our_ratchet_pub = generate_x25519_keypair_raw()
@@ -550,16 +667,17 @@ def complete_session_first_message(state, sender_ratchet_pub_raw, nonce_b64, cip
 
     nonce = _b64d(nonce_b64)
     ciphertext = _b64d(ciphertext_b64)
-    sid = state.session_id
-    if not isinstance(sid, bytes):
-        sid = sid.encode()
+
+    # R17: 首条消息同样绑定消息头 (v2)。发送方 send_message 用的就是这个
+    # 规范化头, 因此伪造/替换 ratchet_public_key 会在此处认证失败。
+    aad = _header_aad(state.session_id, sender_ratchet_pub_raw, msg_num, pn)
 
     CKr, MK = KDF_CK(state.recv_chain_key)
     # R8: 先验后进 —— 解密失败时不推进链, 也不销毁当前 MK;
     # 此前链先走一步, 首条消息解密失败后对端重传同号消息即永久不可解。
     try:
         aesgcm = AESGCM(MK)
-        plain = aesgcm.decrypt(nonce, ciphertext, sid)
+        plain = aesgcm.decrypt(nonce, ciphertext, aad)
     except Exception:
         return None
     state.recv_chain_key = CKr
