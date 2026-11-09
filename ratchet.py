@@ -517,6 +517,18 @@ def try_decrypt_skipped(state, their_ratchet_pub_raw, msg_num, nonce, ciphertext
         return None
 
 
+def _x3dh_ad(initiator, responder):
+    """X3DH 的关联数据: 把双方身份名绑进根密钥派生 (R18)。
+
+    修复前 root_key 只由 DH 输出决定, 身份名与身份公钥之间没有任何密码学联系,
+    报文里的 `from` 可以随便写。绑定后, 双方必须对"谁发起、谁是接收方"达成
+    一致, 任何一方身份被替换都会得到不同的 root_key, 握手直接失败。
+    """
+    return (b"zhchat-session-root-v1|"
+            + str(initiator).encode("utf-8") + b"|"
+            + str(responder).encode("utf-8"))
+
+
 def x3dh_initiate_session(
     peer_identity_key_pub_pem,
     peer_signed_prekey_pub_pem,
@@ -552,7 +564,7 @@ def x3dh_initiate_session(
         algorithm=hashes.SHA256(),
         length=KEY_SIZE,
         salt=b"zhcrypt-x3dh-v2",
-        info=b"zhchat-session-root-v1",
+        info=_x3dh_ad(my_identity, peer_identity),
     ).derive(dh_bytes)
 
     session_id = secrets.token_bytes(16)
@@ -619,7 +631,7 @@ def x3dh_complete_session(
         algorithm=hashes.SHA256(),
         length=KEY_SIZE,
         salt=b"zhcrypt-x3dh-v2",
-        info=b"zhchat-session-root-v1",
+        info=_x3dh_ad(sender_identity, my_identity),
     ).derive(dh_bytes)
 
     if session_id is None:

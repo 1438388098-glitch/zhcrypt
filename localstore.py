@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS friends (
 );
 """
 
+# R18: x3dh_init 幂等去重表。握手消息的重放不会改变密钥, 但会重置棘轮状态、
+# 重新展示旧明文, 前向保密因此倒退 (旧消息的密钥又"活"了一次)。
+DDL_SEEN_INITS = """
+CREATE TABLE IF NOT EXISTS seen_inits (
+    msg_id      TEXT PRIMARY KEY,
+    peer        TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    ts          REAL NOT NULL
+);
+"""
+
 
 class LocalStore:
     def __init__(self, db_path: str):
@@ -95,6 +106,7 @@ class LocalStore:
                 + DDL_OUTBOX
                 + DDL_FILE_KEYS
                 + DDL_FRIENDS
+                + DDL_SEEN_INITS
             )
 
     def close(self):
@@ -347,3 +359,34 @@ class LocalStore:
                 (f"%{escaped}%", limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ---- x3dh_init 重放防护 ----
+
+    def mark_init_seen(self, msg_id, peer, session_id, ts=None, keep=2000) -> bool:
+        """记录一条已成功处理的 x3dh_init。
+
+        返回 True = 首次处理; False = 重复 (重放), 调用方应直接丢弃。
+
+        只保留最近 keep 条: 重放窗口只需要覆盖"历史消息还能被服务器吐出来"
+        的范围, 无上限增长反而成了新的 DB 膨胀源。
+        """
+        if not msg_id:
+            # 没有 msg_id 无法去重 (老服务端?); 交给会话级判定兜底
+            return True
+        with self._conn() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO seen_inits(msg_id, peer, session_id, ts) "
+                    "VALUES (?, ?, ?, ?)",
+                    (str(msg_id), str(peer), str(session_id),
+                     float(ts) if ts is not None else time.time()),
+                )
+            except sqlite3.IntegrityError:
+                return False
+            conn.execute(
+                "DELETE FROM seen_inits WHERE msg_id NOT IN ("
+                "  SELECT msg_id FROM seen_inits ORDER BY ts DESC LIMIT ?)",
+                (int(keep),),
+            )
+        return True
+

@@ -36,6 +36,41 @@ OUTBOUND = queue.Queue()
 # 便于排障; 默认完全静默 (不打扰正常使用, 也不泄露内容, 只输出事件元信息)。
 _DEBUG = bool(os.environ.get("ZHCRYPT_DEBUG"))
 
+# R18: x3dh_init 回滚判定的时钟容差。重放一条"历史 init"时, 其 timestamp
+# 必然早于当前会话的 created_at; 但两端时钟有偏差, 留 5 分钟余量, 避免把
+# 对端时钟慢一点的合法重连误判成重放。
+X3DH_REPLAY_SKEW_SEC = 300
+
+
+def is_x3dh_replay(existing_state, msg):
+    """判断一条 x3dh_init 是否是对现有会话的重放/回滚。
+
+    两种命中:
+      1. session_id 与当前会话相同 —— 同一次握手的重复投递;
+      2. 消息时间戳明显早于当前会话建立时间 —— 历史 init 被服务器重放。
+
+    返回 True 表示调用方应当丢弃该消息。
+    """
+    if existing_state is None:
+        return False
+    cur = getattr(existing_state, "session_id", "")
+    cur_hex = cur.hex() if isinstance(cur, bytes) else str(cur)
+    incoming = msg.get("session_id", "") or ""
+    if incoming and incoming == cur_hex:
+        return True
+    try:
+        ts = float(msg.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    try:
+        created = float(getattr(existing_state, "created_at", 0) or 0)
+    except (TypeError, ValueError):
+        created = 0.0
+    if ts and created and ts < created - X3DH_REPLAY_SKEW_SEC:
+        return True
+    return False
+
+
 
 def _dbg(msg):
     if _DEBUG:
@@ -799,6 +834,12 @@ class ChatClient:
                         "recovery": "请通知对方重新发起会话"}
 
         if msg_type == "x3dh_init":
+            # R18 重放防护: 握手消息会重置棘轮状态并让旧明文可再次解出,
+            # 前向保密因此倒退。这里先做会话级判定 (同 session_id / 时间戳回滚),
+            # 消息级幂等在 _handle_x3dh_init 成功后再落库。
+            if is_x3dh_replay(state, msg):
+                _dbg(f"drop replayed x3dh_init from {peer_identity}")
+                return None
             return self._handle_x3dh_init(msg)
 
         if msg_type == "x3dh_reply":
@@ -853,6 +894,23 @@ class ChatClient:
         sender_signing_pub_pem = _b64d(payload.get("signing_public_key", "")) if payload.get("signing_public_key") else b""
         sender_identity = msg["from"]
         session_id = msg.get("session_id", "")
+
+        # R18 身份绑定: X3DH 里的 IK 必须与服务器注册的身份公钥一致。
+        # 修复前接收方直接采信报文里的 sender_identity_pub, 持有共享 token 的
+        # 任何人只要把 from 写成 "alice" 就能冒充首联系人 (TOFU 会被钉在攻击者
+        # 密钥上)。服务端的 /v1/prekey/meta 是只读端点, 不消耗 OTP。
+        meta = self._fetch_peer_meta(sender_identity)
+        if meta.get("ok"):
+            try:
+                registered_ik = _b64d((meta.get("identity_key_pub") or "").encode())
+            except Exception:
+                registered_ik = b""
+            if registered_ik and registered_ik != sender_id_pub_raw:
+                return {"error":
+                        f"{sender_identity} 的身份公钥与服务器注册记录不一致"
+                        f"（疑似冒充或中间人），拒绝建立会话"}
+        # meta 不可用 (旧服务端/对端未注册) 时降级为 TOFU + 安全码人工核对,
+        # 不阻断 —— 否则老版本用户会完全无法握手。
 
         # 审计 #5: 响应方也做 TOFU 固定与换钥检测
         if sender_signing_pub_pem:
@@ -921,6 +979,12 @@ class ChatClient:
             )
 
             if plain is not None:
+                # R18: 只有真正解出明文才把这条 init 记为已处理,
+                # 失败的尝试 (OTP 不匹配等) 不占用 msg_id。
+                if not self.store.mark_init_seen(
+                        msg.get("id", ""), sender_identity,
+                        session_id, msg.get("timestamp")):
+                    return None
                 save_session(state, self.passphrase)
                 return self._parse_decrypted(plain, msg)
 
